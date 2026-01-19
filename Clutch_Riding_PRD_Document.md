@@ -148,6 +148,7 @@ Develop an automated daily analysis system that:
 - **Update Frequency:** Real-time (1-60 second intervals)
 - **Data Volume:** ~1,000,000 records per day (fleet-wide)
 - **Records per Vehicle:** 50 - 5,000 per day
+- **Clutch Switch Status:** There are 3 values in our DB namely "Pressed", "Released" and "Reserved". Reserved is the case when data is not recieved and generally it is in BS4 vehicles.
 - **Cumulative Columns:** `fuel_consumption`, `obddistance` (monotonically increasing)
 - **Sparse Data:** NULL values when vehicle is stationary
 
