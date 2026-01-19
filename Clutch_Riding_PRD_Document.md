@@ -134,7 +134,7 @@ Develop an automated daily analysis system that:
 
 | Column Name | Data Type | Description | Unit | Sample Value |
 |------------|-----------|-------------|------|--------------|
-| `uniqueid` | VARCHAR | Vehicle identifier | - | VEH001 |
+| `uniqueid` | VARCHAR | Vehicle identifier | - | it_31239199 |
 | `ts` | INTEGER | Unix timestamp | seconds | 1705334400 |
 | `vehiclespeed` | NUMERIC | Current speed | km/h | 45.5 |
 | `rpm` | NUMERIC | Engine RPM | rev/min | 1850 |
