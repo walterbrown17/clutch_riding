@@ -274,9 +274,6 @@ This table provides a high-level summary for each vehicle for each day, aggregat
 | `monetary_savings_inr` | FLOAT | Potential cost savings | ₹ |
 
 
-## 6.3 Customer-Facing Report Example
-The `clutch_riding_daily_summary` table is designed to directly power customer reports. Below is a simplified example of a daily summary for a Fleet Manager.
-
 ---
 
 # 7. IMPLEMENTATION DETAILS
