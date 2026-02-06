@@ -30,7 +30,6 @@ This document specifies the technical requirements for an automated system that 
 
 ## 1.2 Scope
 - **In Scope:** Processing of historical engine cycles, detection of clutch and normal riding events, and permanent storage of these events in a new database table.
-- **Out of Scope:** Real-time monitoring, driver-facing dashboards (covered in a separate product PRD).
 
 ## 1.3 Definitions
 
@@ -58,9 +57,11 @@ Develop an automated data processing pipeline that:
 4.  Persists the granular event-level data into a new, permanent database table for analytical use.
 
 ## 2.3 Success Metrics
--   Successfully process 7 days of historical data for the target fleet.
--   Populate the new `clutch_riding_events` table with event data.
--   The resulting data must be sufficient to power downstream analysis, including hypothesis testing and dashboard creation.
+The success of this project will be measured by its ability to produce a dataset that is robust and enables clear, data-driven insights.
+
+- **Data Robustness:** The pipeline must be able to successfully process any specified date range of historical data and populate the `clutch_riding_events` table.
+- **Hypothesis Validation:** The final dataset must clearly demonstrate a statistically significant negative correlation between clutch riding and fuel efficiency.
+- **Actionable Insight Generation:** The data must confirm that for "Long" and "Very Long" duration clutch riding events, mileage is worse than normal driving mileage in over 80% of observed cases.
 
 <div style="page-break-after: always;"></div>
 
@@ -104,9 +105,8 @@ Develop an automated data processing pipeline that:
 
 ## 3.2 Processing Flow
 
-**Step 1:** Load engine cycle data for the target date range from a fallback file (`engineoncycles_temp.csv`).
-**Step 2:** For each engine cycle (in parallel):
-&nbsp;&nbsp;&nbsp;&nbsp;→ Fetch time-series OBD data from `obd_data_history`, including `fuel_rate`.
+**Step 1:** Fetch target engine cycles from the `engineoncycles` table in `OS_DB`.
+**Step 2:** For each engine cycle, fetch the corresponding time-series OBD data from the `obd_data_history` table in `tracking_db` using the `uniqueid`, `cycle_start_ts`, and `cycle_end_ts`.
 **Step 3:** Process the data for each cycle (in parallel):
 &nbsp;&nbsp;&nbsp;&nbsp;→ Identify `is_clutch_riding` status for each packet.
 &nbsp;&nbsp;&nbsp;&nbsp;→ Group consecutive packets with the same status into events.
@@ -141,18 +141,16 @@ Develop an automated data processing pipeline that:
 | `obddistance` | NUMERIC | Cumulative distance from odometer |
 
 ## 4.2 Input Table 2: Engine Cycles
-
-**Source:** Fallback File
-**File:** `engineoncycles_temp.csv`
+**Database:** `OS_DB`
+**Table:** `public.engineoncycles`
 
 ### 4.2.1 Relevant Schema
-
 | Column Name | Data Type | Description |
 |---|---|---|
 | `cycle_id` | VARCHAR | Unique identifier for the engine cycle |
-| `uniqueid` | VARCHAR | Vehicle identifier |
-| `cycle_start_ts` | INTEGER | Unix timestamp for the start of the cycle |
-| `cycle_end_ts` | INTEGER | Unix timestamp for the end of the cycle |
+| `uniqueid` | VARCHAR | Vehicle identifier, used to join with OBD data |
+| `cycle_start_ts`| INTEGER | Start timestamp for filtering OBD data |
+| `cycle_end_ts` | INTEGER | End timestamp for filtering OBD data |
 
 <div style="page-break-after: always;"></div>
 
@@ -194,6 +192,32 @@ Fuel consumption for each event is calculated using two methods for robustness a
 2.  **From `fuel_consumption`:** Calculating the `diff()` on the cumulative counter.
 
 The final analysis primarily relies on the `fuel_rate` calculation.
+
+```python
+# Method 1: From instantaneous fuel_rate
+# Assumes a 5-second interval between packets
+df['fuel_from_rate'] = (df['fuel_rate'] * 5 / 3600).fillna(0)
+
+# Method 2: From cumulative fuel_consumption
+df['fuel_from_consumption'] = df['fuel_consumption'].diff().fillna(0)
+
+# Basic validation for the diff method
+df.loc[df['fuel_from_consumption'] < 0, 'fuel_from_consumption'] = 0
+```
+
+## 5.5 Event Aggregation
+Once packets are grouped by `event_group`, each group is aggregated to create a single row in the final events table. This involves summing interval-based metrics and averaging point-in-time metrics.
+```python
+# Simplified example of aggregating a single group
+event = {
+    'event_type': 'clutch_riding',
+    'event_start_ts': group_df['ts'].iloc[0],
+    'event_end_ts': group_df['ts'].iloc[-1],
+    'event_duration_sec': group_df['event_duration'].sum(),
+    'event_distance_m': group_df['event_distance'].sum(),
+    'avg_speed_kmh': group_df['vehiclespeed'].mean()
+}
+```
 
 <div style="page-break-after: always;"></div>
 
