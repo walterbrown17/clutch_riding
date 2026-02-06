@@ -225,17 +225,14 @@ event = {
 
 # 6. OUTPUT SPECIFICATION
 
-## 6.1 Primary Output: Database Table
+The pipeline produces two distinct, persistent tables in the database, designed for different analytical needs.
 
-The primary output of this pipeline is a new, persistent table in the database.
+## 6.1 Primary Output 1: Event-Level Table
+This table provides the most granular data, with one row for every detected riding event. It is designed for deep, exploratory analysis and model training.
 
-**Database:** PostgreSQL `tracking_db` (or other analytical DB)
 **Proposed Table Name:** `clutch_riding_events`
 
 ### 6.1.1 Table Schema
-
-This table will contain one row for every detected riding event.
-
 | Column Name | Data Type | Description |
 |---|---|---|
 | `cycle_id` | VARCHAR | Foreign key to the engine cycle |
@@ -245,17 +242,49 @@ This table will contain one row for every detected riding event.
 | `event_end_ts` | INTEGER | End timestamp of the event |
 | `event_duration_sec`| FLOAT | Duration of the event in seconds |
 | `event_distance_m`| FLOAT | Distance covered during the event in meters |
-| `event_fuel_from_rate_liters` | FLOAT | Fuel consumed (from fuel_rate) |
-| `event_fuel_from_consumption_liters`| FLOAT | Fuel consumed (from cumulative counter) |
+| `event_fuel_from_rate_liters` | FLOAT | Fuel consumed during the event (calculated from `fuel_rate`) |
 | `avg_speed_kmh` | FLOAT | Average speed during the event |
 | `avg_rpm` | FLOAT | Average RPM during the event |
 | `consecutive_duration_category`| VARCHAR | 'Short (<10s)', 'Medium (10-30s)', etc. |
 | `event_mileage_from_rate_kmpl` | FLOAT | Mileage (km/L) for the event |
 | `event_date` | DATE | The date the event occurred |
 
-## 6.2 Secondary Output: In-Memory Dataframe
+## 6.2 Primary Output 2: Daily Summary Table
+This table provides a high-level summary for each vehicle for each day, aggregating all of its cycle data. It is optimized for dashboards and daily reporting.
 
-A second dataframe, `clutch_riding_cycle_summary`, is generated for analytical purposes within the notebook but is not designated for persistent storage in this version. It aggregates event data to the cycle level to calculate metrics like `mileage_degradation_pct`.
+**Proposed Table Name:** `clutch_riding_daily_summary`
+
+### 6.2.1 Table Schema
+| Column Name | Data Type | Description | Unit |
+|---|---|---|---|
+| `analysis_date` | DATE | Date of analysis | YYYY-MM-DD |
+| `uniqueid` | VARCHAR | Vehicle identifier | - |
+| `overall_distance_km` | FLOAT | Total distance traveled | km |
+| `overall_fuel_liters` | FLOAT | Total fuel consumed | liters |
+| `overall_mileage_kmpl` | FLOAT | Overall fuel efficiency | km/L |
+| `clutch_riding_distance_km` | FLOAT | Distance during clutch riding | km |
+| `clutch_riding_fuel_liters` | FLOAT | Fuel during clutch riding | liters |
+| `clutch_riding_mileage_kmpl` | FLOAT | Mileage during clutch riding | km/L |
+| `normal_riding_distance_km` | FLOAT | Distance during normal riding | km |
+| `normal_riding_fuel_liters` | FLOAT | Fuel during normal riding | liters |
+| `normal_riding_mileage_kmpl` | FLOAT | Mileage during normal riding | km/L |
+| `clutch_riding_distance_pct` | FLOAT | Percentage of distance while clutch riding | % |
+| `clutch_riding_fuel_pct` | FLOAT | Percentage of fuel consumed by clutch riding | % |
+| `fuel_savings_possible_liters` | FLOAT | Potential fuel savings | liters |
+| `monetary_savings_inr` | FLOAT | Potential cost savings | ₹ |
+
+
+## 6.3 Customer-Facing Report Example
+The `clutch_riding_daily_summary` table is designed to directly power customer reports. Below is a simplified example of a daily summary for a Fleet Manager.
+
+**Daily Clutch Riding Summary - 2026-02-05**
+
+| Vehicle ID | Driver Name | Severe Events | Total Clutch Time | Fuel Wasted (L) | Est. Cost (₹) | Avg. Mileage Degradation |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| VEH-102 | John Doe | 5 | 12.5 min | 1.8 | 180.00 | 22.5% |
+| VEH-045 | Jane Smith | 2 | 8.2 min | 0.9 | 90.00 | 11.0% |
+| VEH-119 | Mike Ross | 1 | 3.1 min | 0.7 | 70.00 | 31.2% |
+| VEH-088 | Emily White| 0 | 0 min | 0.0 | 0.00 | 0.0% |
 
 <div style="page-break-after: always;"></div>
 
