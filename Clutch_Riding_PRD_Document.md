@@ -277,17 +277,6 @@ This table provides a high-level summary for each vehicle for each day, aggregat
 ## 6.3 Customer-Facing Report Example
 The `clutch_riding_daily_summary` table is designed to directly power customer reports. Below is a simplified example of a daily summary for a Fleet Manager.
 
-**Daily Clutch Riding Summary - 2026-02-05**
-
-| Vehicle ID | Driver Name | Severe Events | Total Clutch Time | Fuel Wasted (L) | Est. Cost (₹) | Avg. Mileage Degradation |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| VEH-102 | John Doe | 5 | 12.5 min | 1.8 | 180.00 | 22.5% |
-| VEH-045 | Jane Smith | 2 | 8.2 min | 0.9 | 90.00 | 11.0% |
-| VEH-119 | Mike Ross | 1 | 3.1 min | 0.7 | 70.00 | 31.2% |
-| VEH-088 | Emily White| 0 | 0 min | 0.0 | 0.00 | 0.0% |
-
-<div style="page-break-after: always;"></div>
-
 ---
 
 # 7. IMPLEMENTATION DETAILS
