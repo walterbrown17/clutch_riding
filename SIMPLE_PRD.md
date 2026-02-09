@@ -23,7 +23,7 @@ This document covers the end-to-end data pipeline, including data sources, detai
 Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
 ## 2.2 Solution
-An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
+An automated pipeline, executed via a Jupyter Notebook, that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
 
 ## 2.3 Success Metrics
 - **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
