@@ -3,7 +3,7 @@ title: "Clutch Riding Analysis & Data Pipeline"
 subtitle: "Final Technical Product Requirements Document"
 author: "Data Science Team"
 date: "February 5, 2026"
-version: "3.5"
+version: "3.6"
 classification: "Internal Use"
 ---
 
@@ -57,9 +57,8 @@ graph TD
     end
 
     subgraph "Reporting Layer"
-        J -- and --> I;
         I -- Aggregation Query --> K[Table: vehicle_clutch_riding_ranking];
-        J -- Direct Query --> L[Report: Cycle Drill-Down];
+        I -- Aggregation Query --> L[Report: Cycle Drill-Down];
         K -- Direct Query --> M[Report: Vehicle Ranking];
     end
 ```
@@ -192,48 +191,138 @@ The customer will navigate to the feature via the main application dashboard:
 **`Dashboard` -> `Driver Behaviour` -> `Clutch Riding Analysis`**
 
 ## 7.2 Level 1: Fleet Summary
-The top of the page will display KPIs for the entire fleet, calculated on-the-fly from the data warehouse tables. No separate table is required for this view.
-
----
-**Clutch Riding Fleet Overview**
-
-| Total Vehicles Analyzed | Vehicles with Clutch Riding | Total Fuel Loss (Liters) | Estimated Savings Possible (INR) |
-| :--- | :--- | :--- | :--- |
-| 1,500 | 850 (57%) | 12,350 L | ₹ 1,111,500 |
-
----
+The top of the page will display KPIs for the entire fleet, calculated on-the-fly from the data warehouse tables for the user-selected time period. No separate table is required for this view.
 
 ## 7.3 Level 2: Vehicle Ranking Report
-Below the fleet summary, a table will rank vehicles to identify the most significant offenders. This report is powered by a dedicated reporting table, `vehicle_clutch_riding_ranking`, which is populated daily.
+Below the fleet summary, a table will rank vehicles to identify the most significant offenders. This report is powered by a dedicated reporting table, `vehicle_clutch_riding_ranking`, which stores daily snapshots.
 
-### 7.3.1 Reporting Table: `vehicle_clutch_riding_ranking`
-**Description:** A pre-aggregated table to store the daily ranking of vehicles based on clutch riding severity, ensuring fast report loading.
+### 7.3.1 Dynamic Date Range Strategy
+The `vehicle_clutch_riding_ranking` table is aggregated **daily**. This ensures maximum query performance. To generate a report for a user-selected date range (e.g., "Last 7 Days"), the front-end query will aggregate these daily records on the fly (e.g., `SUM(total_clutch_riding_hours) WHERE ranking_date BETWEEN start AND end`). This provides full flexibility without sacrificing performance.
+
+### 7.3.2 Reporting Table: `vehicle_clutch_riding_ranking`
+**Description:** A pre-aggregated table to store the daily ranking of vehicles based on clutch riding severity. It specifically breaks down severe events into 'Long' and 'Very Long' categories to provide more granular insight.
 
 | Column Name | Data Type | Description |
 |---|---|---|
 | `ranking_date` | DATE | The date the ranking was generated. |
 | `vehicle_id` | VARCHAR(255) | The unique identifier for the vehicle. |
-| `rank` | INT | The vehicle's rank on that day. |
-| `total_clutch_riding_hours` | FLOAT | Total hours spent clutch riding. |
-| `long_very_long_event_count` | INT | The number of severe clutch riding events. |
-| `fuel_wasted_liters` | FLOAT | Total fuel wasted from clutch riding. |
+| `rank` | INT | The vehicle's rank on that day, based on total fuel wasted. |
+| `long_event_duration_hours` | FLOAT | Total hours spent in **'Long'** duration clutch riding events. |
+| `very_long_event_duration_hours` | FLOAT | Total hours spent in **'Very Long'** duration clutch riding events. |
+| `long_event_count` | INT | The number of 'Long' duration clutch riding events. |
+| `very_long_event_count` | INT | The number of 'Very Long' duration clutch riding events. |
+| `fuel_wasted_liters` | FLOAT | Total fuel wasted from all severe clutch riding. |
 | | | **PRIMARY KEY (ranking_date, vehicle_id)** |
 
-### 7.3.2 SQL Schema
+### 7.3.3 SQL Schema
 ```sql
 CREATE TABLE vehicle_clutch_riding_ranking (
     ranking_date DATE,
     vehicle_id VARCHAR(255),
     rank INT,
-    total_clutch_riding_hours FLOAT,
-    long_very_long_event_count INT,
+    long_event_duration_hours FLOAT,
+    very_long_event_duration_hours FLOAT,
+    long_event_count INT,
+    very_long_event_count INT,
     fuel_wasted_liters FLOAT,
     PRIMARY KEY (ranking_date, vehicle_id)
 );
 ```
 
+### 7.3.4 SQL Generation Logic
+The `vehicle_clutch_riding_ranking` table is populated daily using the following SQL query, which aggregates data from the `clutch_riding_events` table.
+
+```sql
+-- This query generates the `vehicle_clutch_riding_ranking` table.
+-- It aggregates event data daily for each vehicle to rank them based on the severity of clutch riding.
+
+-- ASSUMPTIONS:
+-- 1. 'Long' clutch riding events are defined as those with a duration between 61 and 300 seconds.
+-- 2. 'Very Long' clutch riding events are defined as those with a duration greater than 300 seconds.
+-- 3. Fuel wasted is calculated by comparing the fuel consumed during a clutch riding event
+--    to the fuel that *would have been* consumed for the same distance if the vehicle
+--    was operating at its average 'normal_riding' efficiency for that day.
+
+WITH daily_normal_mileage AS (
+    -- First, calculate the average mileage for 'normal_riding' events for each vehicle, each day.
+    -- This provides a baseline efficiency for comparison.
+    SELECT
+        event_date,
+        uniqueid AS vehicle_id,
+        SUM(event_distance_m) / 1000.0 / SUM(event_fuel_from_consumption_liters) AS normal_riding_mileage_kmpl
+    FROM
+        clutch_riding_events
+    WHERE
+        event_type = 'normal_riding'
+        AND is_invalid_mileage_flag = FALSE
+        AND event_fuel_from_consumption_liters > 0
+    GROUP BY
+        event_date,
+        uniqueid
+),
+
+severe_clutch_events AS (
+    -- Next, identify all 'Long' and 'Very Long' clutch riding events, classify them, and calculate fuel wasted.
+    SELECT
+        e.event_date,
+        e.uniqueid AS vehicle_id,
+        e.event_duration_sec,
+        -- Classify the severity of the clutch riding event
+        CASE
+            WHEN e.event_duration_sec > 300 THEN 'very_long'
+            WHEN e.event_duration_sec > 60 THEN 'long'
+            ELSE 'normal'
+        END AS severity,
+        -- Calculate wasted fuel for each severe event
+        -- Formula: (fuel that should have been used) - (fuel actually used)
+        ((e.event_distance_m / 1000.0) / dnm.normal_riding_mileage_kmpl) - e.event_fuel_from_consumption_liters AS fuel_wasted_liters
+    FROM
+        clutch_riding_events e
+    JOIN
+        daily_normal_mileage dnm ON e.uniqueid = dnm.vehicle_id AND e.event_date = dnm.event_date
+    WHERE
+        e.event_type = 'clutch_riding'
+        AND e.event_duration_sec > 60 -- Only consider events longer than 60 seconds
+        AND e.is_invalid_mileage_flag = FALSE
+        AND dnm.normal_riding_mileage_kmpl > 0
+),
+
+daily_ranking_data AS (
+    -- Aggregate the severe event data for each vehicle for each day
+    SELECT
+        event_date AS ranking_date,
+        vehicle_id,
+        -- Sum durations and counts for 'Long' events
+        SUM(CASE WHEN severity = 'long' THEN event_duration_sec ELSE 0 END) / 3600.0 AS long_event_duration_hours,
+        SUM(CASE WHEN severity = 'long' THEN 1 ELSE 0 END) AS long_event_count,
+        -- Sum durations and counts for 'Very Long' events
+        SUM(CASE WHEN severity = 'very_long' THEN event_duration_sec ELSE 0 END) / 3600.0 AS very_long_event_duration_hours,
+        SUM(CASE WHEN severity = 'very_long' THEN 1 ELSE 0 END) AS very_long_event_count,
+        -- Total fuel wasted is the sum of waste from all severe events
+        SUM(CASE WHEN fuel_wasted_liters > 0 THEN fuel_wasted_liters ELSE 0 END) AS fuel_wasted_liters
+    FROM
+        severe_clutch_events
+    GROUP BY
+        event_date,
+        vehicle_id
+)
+
+-- Final step: Rank the vehicles based on total wasted fuel for each day
+SELECT
+    ranking_date,
+    vehicle_id,
+    RANK() OVER (PARTITION BY ranking_date ORDER BY fuel_wasted_liters DESC) AS rank,
+    long_event_duration_hours,
+    very_long_event_duration_hours,
+    long_event_count,
+    very_long_event_count,
+    fuel_wasted_liters
+FROM
+    daily_ranking_data;
+```
+
 ## 7.4 Level 3: Cycle-Level Drill-Down
-Clicking on a vehicle row in the ranking table will show a detailed, cycle-by-cycle breakdown. This view is powered by a direct query on the `clutch_riding_daily_summary` table. No additional table is required.
+Clicking on a vehicle row in the ranking table will show a detailed, cycle-by-cycle breakdown. This view is powered by a direct aggregation query on the `clutch_riding_events` table, grouped by `cycle_id`. No additional table is required.
 
 **Cycle Analysis for Vehicle: VEH-102**
 
@@ -243,3 +332,164 @@ Clicking on a vehicle row in the ranking table will show a detailed, cycle-by-cy
 | 2026-02-05 | 11:30 AM | 15.8% | ₹ 42.10 | None |
 | 2026-02-04 | 04:45 PM | 41.0% | ₹ 105.20 | `HAS_DATA_GAP`|
 | ... | ... | ... | ... | ... |
+
+### 7.4.1 SQL Generation Logic
+The cycle-level drill-down is a live report generated by the following query. It aggregates data from `clutch_riding_events` and filters to show only those cycles where mileage degradation occurred.
+
+```sql
+-- This query generates the "Cycle-Level Drill-Down" report by aggregating
+-- event data for each cycle. It is designed to be executed on-the-fly and only
+-- shows cycles where clutch riding led to a measurable degradation in mileage.
+
+-- ASSUMPTIONS:
+-- 1. "Potential Savings (INR)" is calculated assuming a fuel price of 100 INR per liter.
+-- 2. The query must be filtered for a specific vehicle and date range by the application.
+-- 3. The source for the `Data Quality` flags is not present in the `clutch_riding_events` table
+--    schema provided in the PRD, so 'N/A' is used as a placeholder.
+
+WITH cycle_metrics AS (
+    -- First, calculate key metrics for both event types within each cycle
+    SELECT
+        cycle_id,
+        MIN(event_start_ts) AS cycle_start_ts,
+        event_type,
+        SUM(event_distance_m) / 1000.0 AS total_distance_km,
+        SUM(event_fuel_from_consumption_liters) AS total_fuel_liters
+    FROM
+        clutch_riding_events
+    -- WHERE uniqueid = '{vehicle_id}' AND event_date IN ({date_range}) -- Placeholder for app filtering
+    GROUP BY
+        cycle_id,
+        event_type
+),
+
+cycle_comparison AS (
+    -- Pivot the data to have normal and clutch riding metrics side-by-side for each cycle
+    SELECT
+        cycle_id,
+        cycle_start_ts,
+        MAX(CASE WHEN event_type = 'normal_riding' THEN total_distance_km / total_fuel_liters ELSE NULL END) AS normal_mileage_kmpl,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_distance_km / total_fuel_liters ELSE NULL END) AS clutch_mileage_kmpl,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_distance_km ELSE 0 END) AS clutch_distance_km,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_fuel_liters ELSE 0 END) AS clutch_fuel_liters
+    FROM
+        cycle_metrics
+    WHERE
+        total_fuel_liters > 0
+    GROUP BY
+        cycle_id,
+        cycle_start_ts
+),
+
+final_report_data AS (
+    -- Calculate degradation, savings, and format the output for all cycles with clutch riding
+    SELECT
+        TO_CHAR(TO_TIMESTAMP(cycle_start_ts), 'YYYY-MM-DD') AS "Cycle Date",
+        TO_CHAR(TO_TIMESTAMP(cycle_start_ts), 'HH:MI AM') AS "Cycle Start Time",
+        -- Calculate mileage degradation
+        CASE
+            WHEN normal_mileage_kmpl > 0 AND clutch_mileage_kmpl > 0 THEN
+                ROUND(
+                    ( (normal_mileage_kmpl - clutch_mileage_kmpl) / normal_mileage_kmpl ) * 100
+                , 2)
+            ELSE 0
+        END AS "Mileage Degradation",
+        -- Calculate potential savings, assuming 100 INR/liter
+        CASE
+            WHEN normal_mileage_kmpl > 0 AND clutch_mileage_kmpl > 0 AND normal_mileage_kmpl > clutch_mileage_kmpl THEN
+                ROUND(
+                    ((clutch_distance_km / normal_mileage_kmpl) - clutch_fuel_liters) * 100.0
+                , 2)
+            ELSE 0
+        END AS "Potential Savings (INR)",
+        'N/A' AS "Data Quality" -- Placeholder for unavailable DQ flags
+    FROM
+        cycle_comparison
+    WHERE
+        clutch_mileage_kmpl IS NOT NULL -- Only include cycles that have clutch riding
+)
+
+-- Final step: Filter for cycles with actual mileage degradation
+SELECT *
+FROM final_report_data
+WHERE "Mileage Degradation" > 0
+ORDER BY "Cycle Date" DESC, "Cycle Start Time" DESC;
+```
+### 7.4.1 SQL Generation Logic
+The cycle-level drill-down is a live report generated by the following query when a user selects a vehicle. The query aggregates data from `clutch_riding_events` for the specified vehicle and date range.
+
+```sql
+-- This query generates the "Cycle-Level Drill-Down" report by aggregating
+-- event data for each cycle. It is designed to be executed on-the-fly.
+
+-- ASSUMPTIONS:
+-- 1. "Potential Savings (INR)" is calculated assuming a fuel price of 100 INR per liter.
+-- 2. The query must be filtered for a specific vehicle and date range by the application.
+-- 3. The source for the `Data Quality` flags is not present in the `clutch_riding_events` table
+--    schema provided in the PRD, so 'N/A' is used as a placeholder.
+
+WITH cycle_metrics AS (
+    -- First, calculate key metrics for both event types within each cycle
+    SELECT
+        cycle_id,
+        MIN(event_start_ts) AS cycle_start_ts,
+        event_type,
+        SUM(event_distance_m) / 1000.0 AS total_distance_km,
+        SUM(event_fuel_from_consumption_liters) AS total_fuel_liters
+    FROM
+        clutch_riding_events
+    -- WHERE uniqueid = '{vehicle_id}' AND event_date IN ({date_range}) -- Placeholder for app filtering
+    GROUP BY
+        cycle_id,
+        event_type
+),
+
+cycle_comparison AS (
+    -- Pivot the data to have normal and clutch riding metrics side-by-side for each cycle
+    SELECT
+        cycle_id,
+        cycle_start_ts,
+        MAX(CASE WHEN event_type = 'normal_riding' THEN total_distance_km / total_fuel_liters ELSE NULL END) AS normal_mileage_kmpl,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_distance_km / total_fuel_liters ELSE NULL END) AS clutch_mileage_kmpl,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_distance_km ELSE 0 END) AS clutch_distance_km,
+        MAX(CASE WHEN event_type = 'clutch_riding' THEN total_fuel_liters ELSE 0 END) AS clutch_fuel_liters
+    FROM
+        cycle_metrics
+    WHERE
+        total_fuel_liters > 0
+    GROUP BY
+        cycle_id,
+        cycle_start_ts
+)
+
+-- Final step: Calculate degradation, savings, and format the output
+SELECT
+    TO_CHAR(TO_TIMESTAMP(cycle_start_ts), 'YYYY-MM-DD') AS "Cycle Date",
+    TO_CHAR(TO_TIMESTAMP(cycle_start_ts), 'HH:MI AM') AS "Cycle Start Time",
+    -- Calculate mileage degradation
+    CASE
+        WHEN normal_mileage_kmpl > 0 THEN
+            ROUND(
+                GREATEST(
+                    0,
+                    ( (normal_mileage_kmpl - clutch_mileage_kmpl) / normal_mileage_kmpl ) * 100
+                ),
+            2)
+        ELSE 0
+    END AS "Mileage Degradation",
+    -- Calculate potential savings, assuming 100 INR/liter
+    CASE
+        WHEN normal_mileage_kmpl > clutch_mileage_kmpl THEN
+            ROUND(
+                ((clutch_distance_km / normal_mileage_kmpl) - clutch_fuel_liters) * 100.0,
+            2)
+        ELSE 0
+    END AS "Potential Savings (INR)",
+    'N/A' AS "Data Quality" -- Placeholder for unavailable DQ flags
+FROM
+    cycle_comparison
+WHERE
+    clutch_mileage_kmpl IS NOT NULL -- Only include cycles that have clutch riding
+ORDER BY
+    cycle_start_ts DESC;
+```
