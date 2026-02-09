@@ -199,29 +199,29 @@ WITH cycle_agg AS (
 
         -- Normal Riding aggregation
         SUM(CASE WHEN event_type = 'normal_riding' THEN event_distance_m / 1000.0 ELSE 0 END) AS normal_dist,
-        SUM(CASE WHEN event_type = 'normal_riding' THEN event_fuel_from_consumption_liters ELSE 0 END) AS normal_fuel,
+        SUM(CASE WHEN event_type = 'normal_riding' THEN event_fuel_from_rate_liters ELSE 0 END) AS normal_fuel,
         
         -- Short CR aggregation
         SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec <= 30 THEN event_distance_m / 1000.0 ELSE 0 END) AS short_dist,
-        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec <= 30 THEN event_fuel_from_consumption_liters ELSE 0 END) AS short_fuel,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec <= 30 THEN event_fuel_from_rate_liters ELSE 0 END) AS short_fuel,
 
         -- Medium CR aggregation
         SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 30 AND event_duration_sec <= 60 THEN event_distance_m / 1000.0 ELSE 0 END) AS medium_dist,
-        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 30 AND event_duration_sec <= 60 THEN event_fuel_from_consumption_liters ELSE 0 END) AS medium_fuel,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 30 AND event_duration_sec <= 60 THEN event_fuel_from_rate_liters ELSE 0 END) AS medium_fuel,
 
         -- Long CR aggregation
         SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 60 AND event_duration_sec <= 300 THEN event_distance_m / 1000.0 ELSE 0 END) AS long_dist,
-        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 60 AND event_duration_sec <= 300 THEN event_fuel_from_consumption_liters ELSE 0 END) AS long_fuel,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 60 AND event_duration_sec <= 300 THEN event_fuel_from_rate_liters ELSE 0 END) AS long_fuel,
 
         -- Very Long CR aggregation
         SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 300 THEN event_distance_m / 1000.0 ELSE 0 END) AS very_long_dist,
-        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 300 THEN event_fuel_from_consumption_liters ELSE 0 END) AS very_long_fuel
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 300 THEN event_fuel_from_rate_liters ELSE 0 END) AS very_long_fuel
 
     FROM
         clutch_riding_events
     WHERE 
         is_invalid_mileage_flag = FALSE
-        AND event_fuel_from_consumption_liters > 0
+        AND event_fuel_from_rate_liters > 0
     GROUP BY
         cycle_id
 ),
@@ -328,13 +328,13 @@ WITH daily_normal_mileage AS (
     SELECT
         event_date,
         uniqueid AS vehicle_id,
-        SUM(event_distance_m) / 1000.0 / SUM(event_fuel_from_consumption_liters) AS normal_riding_mileage_kmpl
+        SUM(event_distance_m) / 1000.0 / SUM(event_fuel_from_rate_liters) AS normal_riding_mileage_kmpl
     FROM
         clutch_riding_events
     WHERE
         event_type = 'normal_riding'
         AND is_invalid_mileage_flag = FALSE
-        AND event_fuel_from_consumption_liters > 0
+        AND event_fuel_from_rate_liters > 0
     GROUP BY
         event_date,
         uniqueid
@@ -354,7 +354,7 @@ severe_clutch_events AS (
         END AS severity,
         -- Calculate wasted fuel for each severe event
         -- Formula: (fuel that should have been used) - (fuel actually used)
-        ((e.event_distance_m / 1000.0) / dnm.normal_riding_mileage_kmpl) - e.event_fuel_from_consumption_liters AS fuel_wasted_liters
+        ((e.event_distance_m / 1000.0) / dnm.normal_riding_mileage_kmpl) - e.event_fuel_from_rate_liters AS fuel_wasted_liters
     FROM
         clutch_riding_events e
     JOIN
@@ -433,11 +433,11 @@ WITH cycle_agg AS (
 
         -- Calculate total distance and fuel for normal riding events
         SUM(CASE WHEN event_type = 'normal_riding' THEN event_distance_m ELSE 0 END) / 1000.0 AS normal_distance_km,
-        SUM(CASE WHEN event_type = 'normal_riding' THEN event_fuel_from_consumption_liters ELSE 0 END) AS normal_fuel_liters,
+        SUM(CASE WHEN event_type = 'normal_riding' THEN event_fuel_from_rate_liters ELSE 0 END) AS normal_fuel_liters,
 
         -- Calculate total distance and fuel for clutch riding events
         SUM(CASE WHEN event_type = 'clutch_riding' THEN event_distance_m ELSE 0 END) / 1000.0 AS clutch_distance_km,
-        SUM(CASE WHEN event_type = 'clutch_riding' THEN event_fuel_from_consumption_liters ELSE 0 END) AS clutch_fuel_liters
+        SUM(CASE WHEN event_type = 'clutch_riding' THEN event_fuel_from_rate_liters ELSE 0 END) AS clutch_fuel_liters
     FROM
         clutch_riding_events
     -- WHERE uniqueid = '{vehicle_id}' AND event_date IN ({date_range}) -- Placeholder for app filtering
