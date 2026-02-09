@@ -23,7 +23,7 @@ This document covers the end-to-end data pipeline, including data sources, detai
 Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
 ## 2.2 Solution
-An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables that directly power a multi-level customer-facing report.
+An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into a single structured, persistent database table that directly powers a multi-level customer-facing report.
 
 ## 2.3 Success Metrics
 - **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
@@ -53,7 +53,6 @@ graph TD
     
     subgraph "Data Warehouse Tables"
         H --> I[Table: clutch_riding_events];
-        H --> J[Table: clutch_riding_daily_summary];
     end
 
     subgraph "Reporting Layer"
@@ -138,11 +137,11 @@ The pipeline generates flags to identify questionable data without deleting it.
 
 # 6. Data Warehouse Output Specification
 
-The pipeline produces two primary, persistent tables in the data warehouse.
+The pipeline produces a single primary, persistent table in the data warehouse.
 
-## 6.1 Output 1: Event-Level Table
+## 6.1 Event-Level Table
 **Table Name:** `clutch_riding_events`
-**Description:** Contains one row for every detected riding event. This is the source of truth for all other aggregations.
+**Description:** Contains one row for every detected riding event. This is the source of truth for all other aggregations and reports.
 
 | Column Name | Data Type | Description |
 |---|---|---|
@@ -161,24 +160,6 @@ The pipeline produces two primary, persistent tables in the data warehouse.
 | `event_mileage_kmpl`| FLOAT | Final, unified mileage (km/L) for the event |
 | `is_invalid_mileage_flag` | BOOLEAN | `True` if the final mileage is invalid. |
 | `event_date` | DATE | The date the event occurred |
-
-## 6.2 Output 2: Daily Summary Table
-**Table Name:** `clutch_riding_daily_summary`
-**Description:** Contains one row per vehicle per day, optimized for high-level dashboarding and drill-downs.
-
-| Column Name | Data Type | Description |
-|---|---|---|
-| `analysis_date` | DATE | Date of analysis |
-| `uniqueid` | VARCHAR | Vehicle identifier |
-| `overall_distance_km`| FLOAT | Total distance traveled |
-| `clutch_riding_mileage_kmpl`| FLOAT | Mileage during valid clutch riding events |
-| `normal_riding_mileage_kmpl`| FLOAT | Mileage during valid normal riding events |
-| `mileage_degradation_pct`| FLOAT | Percentage drop in mileage due to clutch riding |
-| `is_short_duration_cycle` | BOOLEAN | `True` if total cycle duration is < 60 seconds |
-| `is_short_distance_cycle` | BOOLEAN | `True` if total cycle distance is < 0.1 km |
-| `has_data_gap_flag` | BOOLEAN | `True` if time between packets exceeded 45 seconds |
-| `has_odometer_reset_flag`| BOOLEAN | `True` if the odometer reading went backward |
-| | | **PRIMARY KEY (analysis_date, uniqueid)** |
 
 <div style="page-break-after: always;"></div>
 
