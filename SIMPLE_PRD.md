@@ -23,7 +23,7 @@ This document covers the end-to-end data pipeline, including data sources, detai
 Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
 ## 2.2 Solution
-An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into a single structured, persistent database table that directly powers a multi-level customer-facing report.
+An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables that directly power a multi-level customer-facing report.
 
 ## 2.3 Success Metrics
 - **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
@@ -53,6 +53,7 @@ graph TD
     
     subgraph "Data Warehouse Tables"
         H --> I[Table: clutch_riding_events];
+        H --> J[Table: clutch_riding_cycle_summary];
     end
 
     subgraph "Reporting Layer"
@@ -137,9 +138,9 @@ The pipeline generates flags to identify questionable data without deleting it.
 
 # 6. Data Warehouse Output Specification
 
-The pipeline produces a single primary, persistent table in the data warehouse.
+The pipeline produces two primary, persistent tables in the data warehouse.
 
-## 6.1 Event-Level Table
+## 6.1 Output 1: Event-Level Table
 **Table Name:** `clutch_riding_events`
 **Description:** Contains one row for every detected riding event. This is the source of truth for all other aggregations and reports.
 
@@ -160,6 +161,103 @@ The pipeline produces a single primary, persistent table in the data warehouse.
 | `event_mileage_kmpl`| FLOAT | Final, unified mileage (km/L) for the event |
 | `is_invalid_mileage_flag` | BOOLEAN | `True` if the final mileage is invalid. |
 | `event_date` | DATE | The date the event occurred |
+
+## 6.2 Output 2: Cycle-Level Summary Table
+**Table Name:** `clutch_riding_cycle_summary`
+**Description:** Contains one row for every engine cycle that has at least one clutch riding event. It provides a pre-calculated breakdown of clutch riding mileage based on event duration.
+
+| Column Name | Data Type | Description |
+|---|---|---|
+| `cycle_id` | VARCHAR | Primary Key, foreign key to the engine cycle. |
+| `cycle_start_ts`| BIGINT | Start timestamp of the cycle. |
+| `cycle_end_ts` | BIGINT | End timestamp of the cycle. |
+| `short_cr_mileage_kmpl` | FLOAT | Mileage during 'Short' duration clutch riding events (<= 30s). |
+| `medium_cr_mileage_kmpl` | FLOAT | Mileage during 'Medium' duration clutch riding events (31-60s). |
+| `long_cr_mileage_kmpl` | FLOAT | Mileage during 'Long' duration clutch riding events (61-300s). |
+| `very_long_cr_mileage_kmpl`| FLOAT | Mileage during 'Very Long' duration clutch riding events (> 300s). |
+
+### 6.2.1 SQL Generation Logic
+This table can be generated from the `clutch_riding_events` table using the following query.
+
+```sql
+-- This query generates the `clutch_riding_cycle_summary` table.
+-- It aggregates all clutch riding events for each cycle and calculates the mileage
+-- for different event duration categories.
+
+-- DURATION DEFINITIONS:
+-- Short:      <= 30 seconds
+-- Medium:     31 - 60 seconds
+-- Long:       61 - 300 seconds
+-- Very Long:  > 300 seconds
+
+WITH cr_events_by_duration AS (
+    -- First, categorize each clutch riding event by its duration
+    SELECT
+        cycle_id,
+        event_distance_m / 1000.0 AS distance_km,
+        event_fuel_from_consumption_liters AS fuel_liters,
+        CASE
+            WHEN event_duration_sec <= 30 THEN 'short'
+            WHEN event_duration_sec <= 60 THEN 'medium'
+            WHEN event_duration_sec <= 300 THEN 'long'
+            ELSE 'very_long'
+        END AS duration_category
+    FROM
+        clutch_riding_events
+    WHERE
+        event_type = 'clutch_riding'
+        AND is_invalid_mileage_flag = FALSE
+        AND event_fuel_from_consumption_liters > 0
+),
+
+cycle_mileage_agg AS (
+    -- Aggregate distance and fuel for each category within each cycle
+    SELECT
+        cycle_id,
+        -- Sum distance and fuel for each category
+        SUM(CASE WHEN duration_category = 'short' THEN distance_km ELSE 0 END) AS short_dist,
+        SUM(CASE WHEN duration_category = 'short' THEN fuel_liters ELSE 0 END) AS short_fuel,
+        SUM(CASE WHEN duration_category = 'medium' THEN distance_km ELSE 0 END) AS medium_dist,
+        SUM(CASE WHEN duration_category = 'medium' THEN fuel_liters ELSE 0 END) AS medium_fuel,
+        SUM(CASE WHEN duration_category = 'long' THEN distance_km ELSE 0 END) AS long_dist,
+        SUM(CASE WHEN duration_category = 'long' THEN fuel_liters ELSE 0 END) AS long_fuel,
+        SUM(CASE WHEN duration_category = 'very_long' THEN distance_km ELSE 0 END) AS very_long_dist,
+        SUM(CASE WHEN duration_category = 'very_long' THEN fuel_liters ELSE 0 END) AS very_long_fuel
+    FROM
+        cr_events_by_duration
+    GROUP BY
+        cycle_id
+),
+
+cycle_timestamps AS (
+    -- Get the start and end timestamps for each cycle
+    SELECT
+        cycle_id,
+        MIN(event_start_ts) AS cycle_start_ts,
+        MAX(event_end_ts) AS cycle_end_ts
+    FROM
+        clutch_riding_events
+    GROUP BY
+        cycle_id
+)
+
+-- Final step: Join the data and calculate the final mileage values
+SELECT
+    ts.cycle_id,
+    ts.cycle_start_ts,
+    ts.cycle_end_ts,
+    -- Calculate mileage for each category, avoiding division by zero
+    CASE WHEN short_fuel > 0 THEN short_dist / short_fuel ELSE NULL END AS short_cr_mileage_kmpl,
+    CASE WHEN medium_fuel > 0 THEN medium_dist / medium_fuel ELSE NULL END AS medium_cr_mileage_kmpl,
+    CASE WHEN long_fuel > 0 THEN long_dist / long_fuel ELSE NULL END AS long_cr_mileage_kmpl,
+    CASE WHEN very_long_fuel > 0 THEN very_long_dist / very_long_fuel ELSE NULL END AS very_long_cr_mileage_kmpl
+FROM
+    cycle_mileage_agg cma
+JOIN
+    cycle_timestamps ts ON cma.cycle_id = ts.cycle_id
+ORDER BY
+    ts.cycle_id;
+```
 
 <div style="page-break-after: always;"></div>
 
