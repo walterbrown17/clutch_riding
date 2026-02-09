@@ -3,7 +3,7 @@ title: "Clutch Riding Analysis & Data Pipeline"
 subtitle: "Final Technical Product Requirements Document"
 author: "Data Science Team"
 date: "February 5, 2026"
-version: "3.0"
+version: "3.1"
 classification: "Internal Use"
 ---
 
@@ -23,7 +23,7 @@ This document covers the end-to-end data pipeline, including data sources, detai
 Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
 ## 2.2 Solution
-An automated pipeline, executed via a Jupyter Notebook, that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
+An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
 
 ## 2.3 Success Metrics
 - **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
@@ -42,12 +42,11 @@ graph TD
     subgraph "Data Sources"
         A[OS_DB: engineoncycles] --> B;
         C[tracking_db: obd_data_history];
-        D[tracking_db: obd_gear_data];
     end
 
     subgraph "Processing Pipeline (Jupyter)"
         B(Get Cycles) --> E{For each cycle};
-        E --> F[Fetch OBD & Gear Data];
+        E --> F[Fetch OBD Data];
         F --> G[process_cycle_data];
         G --> H[process_single_day];
     end
@@ -70,11 +69,6 @@ graph TD
 - **Table:** `public.obd_data_history`
 - **Purpose:** Provides the core time-series telemetry for each cycle.
 
-## 4.3 Input 3: Gear Data
-- **Database:** `tracking_db`
-- **Table:** `public.obd_gear_data`
-- **Purpose:** Provides the predicted gear for each timestamp.
-
 <div style="page-break-after: always;"></div>
 
 # 5. Processing Logic
@@ -87,7 +81,7 @@ This function processes the raw dataframe for a single cycle into a structured s
 ```mermaid
 graph TD
     subgraph "Input: Raw Cycle DataFrame"
-        A[Raw OBD & Gear Data];
+        A[Raw OBD Data];
     end
 
     subgraph "Processing Steps"
@@ -95,7 +89,7 @@ graph TD
         B --> C(Calculate Interval Features: event_duration, event_distance);
         C --> D(Detect Cycle-Level DQ Issues: Gaps, Odo Resets);
         D --> E(Define 'is_clutch_riding' State);
-        E --> F(Create Event Groups based on state OR gear change);
+        E --> F(Create Event Groups based on state change);
         F --> G(Aggregate each group into a single event row);
         G --> H(Calculate Event-Level DQ Flag: 'is_invalid_mileage_flag');
     end
@@ -121,12 +115,11 @@ df.loc[df['event_distance'] < 0, 'event_distance'] = 0
 ```
 
 ### 5.1.2 Event Grouping Logic
-Events are created when the clutch riding status changes OR the predicted gear changes.
+Events are created only when the clutch riding status changes.
 
 ```python
 # In process_cycle_data:
-df['predicted_gear'] = df['predicted_gear'].ffill()
-df['event_group'] = ((df['is_clutch_riding'] != df['is_clutch_riding'].shift()) | (df['predicted_gear'] != df['predicted_gear'].shift())).cumsum()
+df['event_group'] = (df['is_clutch_riding'] != df['is_clutch_riding'].shift()).cumsum()
 ```
 
 ### 5.1.3 Event Aggregation & Flagging
@@ -200,7 +193,6 @@ The pipeline produces two primary, persistent tables in the database.
 | `event_fuel_from_rate_liters` | FLOAT | Fuel consumed (from `fuel_rate`) |
 | `avg_speed_kmh` | FLOAT | Average speed during the event |
 | `avg_rpm` | FLOAT | Average RPM during the event |
-| `gear` | INTEGER | The gear the event occurred in |
 | `event_mileage_from_rate_kmpl`| FLOAT | Mileage (km/L) for the event |
 | `is_invalid_mileage_flag` | BOOLEAN | `True` if mileage is > 15 or fuel/distance is zero. |
 | `event_date` | DATE | The date the event occurred |
