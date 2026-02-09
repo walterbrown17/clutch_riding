@@ -3,7 +3,7 @@ title: "Clutch Riding Analysis & Data Pipeline"
 subtitle: "Final Technical Product Requirements Document"
 author: "Data Science Team"
 date: "February 5, 2026"
-version: "3.3"
+version: "3.4"
 classification: "Internal Use"
 ---
 
@@ -171,6 +171,47 @@ The pipeline produces two primary, persistent tables in the database.
 | `is_short_distance_cycle` | BOOLEAN | `True` if total cycle distance is < 0.1 km |
 | `has_data_gap_flag` | BOOLEAN | `True` if time between packets exceeded 45 seconds |
 | `has_odometer_reset_flag`| BOOLEAN | `True` if the odometer reading went backward |
+
+## 6.3 SQL Schema Definitions
+Below are the `CREATE TABLE` statements for the two output tables.
+
+### 6.3.1 `clutch_riding_events`
+```sql
+CREATE TABLE clutch_riding_events (
+    event_id SERIAL PRIMARY KEY,
+    cycle_id VARCHAR(255),
+    uniqueid VARCHAR(255),
+    event_type VARCHAR(50),
+    event_start_ts BIGINT,
+    event_end_ts BIGINT,
+    event_duration_sec FLOAT,
+    event_distance_m FLOAT,
+    event_fuel_from_rate_liters FLOAT,
+    event_fuel_from_consumption_liters FLOAT,
+    avg_speed_kmh FLOAT,
+    avg_rpm FLOAT,
+    event_mileage_kmpl FLOAT,
+    is_invalid_mileage_flag BOOLEAN,
+    event_date DATE
+);
+```
+
+### 6.3.2 `clutch_riding_daily_summary`
+```sql
+CREATE TABLE clutch_riding_daily_summary (
+    analysis_date DATE,
+    uniqueid VARCHAR(255),
+    overall_distance_km FLOAT,
+    clutch_riding_mileage_kmpl FLOAT,
+    normal_riding_mileage_kmpl FLOAT,
+    mileage_degradation_pct FLOAT,
+    is_short_duration_cycle BOOLEAN,
+    is_short_distance_cycle BOOLEAN,
+    has_data_gap_flag BOOLEAN,
+    has_odometer_reset_flag BOOLEAN,
+    PRIMARY KEY (analysis_date, uniqueid)
+);
+```
 
 <div style="page-break-after: always;"></div>
 
