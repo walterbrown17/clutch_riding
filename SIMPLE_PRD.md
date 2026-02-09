@@ -3,7 +3,7 @@ title: "Clutch Riding Analysis & Data Pipeline"
 subtitle: "Final Technical Product Requirements Document"
 author: "Data Science Team"
 date: "February 5, 2026"
-version: "3.2"
+version: "3.3"
 classification: "Internal Use"
 ---
 
@@ -15,7 +15,7 @@ classification: "Internal Use"
 This document provides a comprehensive technical specification for the automated data pipeline that analyzes vehicle telemetry data to detect clutch riding events, calculates their impact on fuel efficiency, and generates structured, queryable data tables with robust quality flagging.
 
 ## 1.2 Scope
-This document covers the end-to-end data pipeline, including data sources, detailed processing logic, data quality checks, and the schema of the final output tables intended for analytical use and dashboarding.
+This document covers the end-to-end data pipeline, including data sources, detailed processing logic, data quality checks, the schema of the final output tables, and the design for the customer-facing report.
 
 # 2. Business Objective
 
@@ -23,7 +23,7 @@ This document covers the end-to-end data pipeline, including data sources, detai
 Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
 ## 2.2 Solution
-An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
+An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables that directly power a multi-level customer-facing report.
 
 ## 2.3 Success Metrics
 - **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
@@ -172,18 +172,6 @@ The pipeline produces two primary, persistent tables in the database.
 | `has_data_gap_flag` | BOOLEAN | `True` if time between packets exceeded 45 seconds |
 | `has_odometer_reset_flag`| BOOLEAN | `True` if the odometer reading went backward |
 
-## 6.3 Customer-Facing Report Example
-The `clutch_riding_daily_summary` table is designed to directly power customer reports. Below is a simplified example.
-
-**Daily Clutch Riding Summary - 2026-02-05**
-
-| Vehicle ID | Avg. Mileage Degradation | Data Quality Issues |
-| :--- | :--- | :--- |
-| VEH-102 | 22.5% | None |
-| VEH-045 | 11.0% | None |
-| VEH-119 | 31.2% | `HAS_DATA_GAP` |
-| VEH-088 | 0.0% | `SHORT_TRIP` |
-
 <div style="page-break-after: always;"></div>
 
 # 7. IMPLEMENTATION DETAILS
@@ -200,3 +188,53 @@ The process is run within a Jupyter Notebook (`clutch_riding_production_7days.ip
 
 ## 7.3 Data Destination
 The final dataframes are saved to CSV files. A separate process will be responsible for loading these CSVs into the final database tables.
+
+<div style="page-break-after: always;"></div>
+
+# 8. Customer-Facing Reporting
+
+This section outlines the user interface (UI) and user experience (UX) for presenting the clutch riding analysis to the customer.
+
+## 8.1 User Flow
+The customer will navigate to the feature via the main application dashboard:
+**`Dashboard` -> `Driver Behaviour` -> `Clutch Riding Analysis`**
+
+Upon selecting the feature, the customer will be presented with a multi-level report.
+
+## 8.2 Level 1: Fleet Summary
+The top of the page will display key performance indicators (KPIs) for the entire fleet over the selected time period.
+
+---
+**Clutch Riding Fleet Overview**
+
+| Total Vehicles Analyzed | Vehicles with Clutch Riding | Total Fuel Loss (Liters) | Estimated Savings Possible (INR) |
+| :--- | :--- | :--- | :--- |
+| 1,500 | 850 (57%) | 12,350 L | ₹ 1,111,500 |
+
+---
+
+## 8.3 Level 2: Vehicle Ranking Table
+Below the fleet summary, a table will rank vehicles to identify the most significant offenders.
+
+**Ranking Logic:** Vehicles will be sorted in descending order by the **total duration of "Long" and "Very Long" clutch riding events**. This prioritizes vehicles with the most severe and impactful clutch riding habits.
+
+**Vehicle Performance Ranking**
+
+| Rank | Vehicle ID | Total Clutch Riding (Hours) | Long/Very Long Events (Count) | Fuel Wasted (Liters) |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | VEH-102 | 15.2 | 45 | 150.5 |
+| 2 | VEH-045 | 12.8 | 32 | 125.1 |
+| 3 | VEH-119 | 11.5 | 25 | 110.8 |
+| ... | ... | ... | ... | ... |
+
+## 8.4 Level 3: Cycle-Level Drill-Down
+Clicking on a vehicle row in the ranking table will expand to show a detailed, cycle-by-cycle breakdown for that vehicle.
+
+**Cycle Analysis for Vehicle: VEH-102**
+
+| Cycle Date | Cycle Start Time | Mileage Degradation | Potential Savings (INR) | Data Quality |
+| :--- | :--- | :--- | :--- | :--- |
+| 2026-02-05 | 08:15 AM | 35.2% | ₹ 85.50 | None |
+| 2026-02-05 | 11:30 AM | 15.8% | ₹ 42.10 | None |
+| 2026-02-04 | 04:45 PM | 41.0% | ₹ 105.20 | `HAS_DATA_GAP`|
+| ... | ... | ... | ... | ... |
