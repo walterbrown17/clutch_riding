@@ -164,7 +164,7 @@ The pipeline produces two primary, persistent tables in the data warehouse.
 
 ## 6.2 Output 2: Cycle-Level Summary Table
 **Table Name:** `clutch_riding_cycle_summary`
-**Description:** Contains one row for every engine cycle that has at least one clutch riding event. It provides a pre-calculated breakdown of clutch riding mileage based on event duration.
+**Description:** Contains one row for every engine cycle. It provides a pre-calculated breakdown of clutch riding mileage based on event duration, as well as the normal riding mileage for the same cycle for comparison.
 
 | Column Name | Data Type | Description |
 |---|---|---|
@@ -175,14 +175,16 @@ The pipeline produces two primary, persistent tables in the data warehouse.
 | `medium_cr_mileage_kmpl` | FLOAT | Mileage during 'Medium' duration clutch riding events (31-60s). |
 | `long_cr_mileage_kmpl` | FLOAT | Mileage during 'Long' duration clutch riding events (61-300s). |
 | `very_long_cr_mileage_kmpl`| FLOAT | Mileage during 'Very Long' duration clutch riding events (> 300s). |
+| `normal_riding_mileage_kmpl`| FLOAT | Mileage during normal (non-clutch) riding events in the same cycle. |
+
 
 ### 6.2.1 SQL Generation Logic
 This table can be generated from the `clutch_riding_events` table using the following query.
 
 ```sql
 -- This query generates the `clutch_riding_cycle_summary` table.
--- It aggregates all clutch riding events for each cycle and calculates the mileage
--- for different event duration categories.
+-- It aggregates all events for each cycle and calculates the mileage
+-- for normal riding and for different clutch riding duration categories.
 
 -- DURATION DEFINITIONS:
 -- Short:      <= 30 seconds
@@ -190,41 +192,36 @@ This table can be generated from the `clutch_riding_events` table using the foll
 -- Long:       61 - 300 seconds
 -- Very Long:  > 300 seconds
 
-WITH cr_events_by_duration AS (
-    -- First, categorize each clutch riding event by its duration
+WITH cycle_agg AS (
+    -- In a single pass, aggregate distance and fuel for all categories within each cycle
     SELECT
         cycle_id,
-        event_distance_m / 1000.0 AS distance_km,
-        event_fuel_from_consumption_liters AS fuel_liters,
-        CASE
-            WHEN event_duration_sec <= 30 THEN 'short'
-            WHEN event_duration_sec <= 60 THEN 'medium'
-            WHEN event_duration_sec <= 300 THEN 'long'
-            ELSE 'very_long'
-        END AS duration_category
+
+        -- Normal Riding aggregation
+        SUM(CASE WHEN event_type = 'normal_riding' THEN event_distance_m / 1000.0 ELSE 0 END) AS normal_dist,
+        SUM(CASE WHEN event_type = 'normal_riding' THEN event_fuel_from_consumption_liters ELSE 0 END) AS normal_fuel,
+        
+        -- Short CR aggregation
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec <= 30 THEN event_distance_m / 1000.0 ELSE 0 END) AS short_dist,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec <= 30 THEN event_fuel_from_consumption_liters ELSE 0 END) AS short_fuel,
+
+        -- Medium CR aggregation
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 30 AND event_duration_sec <= 60 THEN event_distance_m / 1000.0 ELSE 0 END) AS medium_dist,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 30 AND event_duration_sec <= 60 THEN event_fuel_from_consumption_liters ELSE 0 END) AS medium_fuel,
+
+        -- Long CR aggregation
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 60 AND event_duration_sec <= 300 THEN event_distance_m / 1000.0 ELSE 0 END) AS long_dist,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 60 AND event_duration_sec <= 300 THEN event_fuel_from_consumption_liters ELSE 0 END) AS long_fuel,
+
+        -- Very Long CR aggregation
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 300 THEN event_distance_m / 1000.0 ELSE 0 END) AS very_long_dist,
+        SUM(CASE WHEN event_type = 'clutch_riding' AND event_duration_sec > 300 THEN event_fuel_from_consumption_liters ELSE 0 END) AS very_long_fuel
+
     FROM
         clutch_riding_events
-    WHERE
-        event_type = 'clutch_riding'
-        AND is_invalid_mileage_flag = FALSE
+    WHERE 
+        is_invalid_mileage_flag = FALSE
         AND event_fuel_from_consumption_liters > 0
-),
-
-cycle_mileage_agg AS (
-    -- Aggregate distance and fuel for each category within each cycle
-    SELECT
-        cycle_id,
-        -- Sum distance and fuel for each category
-        SUM(CASE WHEN duration_category = 'short' THEN distance_km ELSE 0 END) AS short_dist,
-        SUM(CASE WHEN duration_category = 'short' THEN fuel_liters ELSE 0 END) AS short_fuel,
-        SUM(CASE WHEN duration_category = 'medium' THEN distance_km ELSE 0 END) AS medium_dist,
-        SUM(CASE WHEN duration_category = 'medium' THEN fuel_liters ELSE 0 END) AS medium_fuel,
-        SUM(CASE WHEN duration_category = 'long' THEN distance_km ELSE 0 END) AS long_dist,
-        SUM(CASE WHEN duration_category = 'long' THEN fuel_liters ELSE 0 END) AS long_fuel,
-        SUM(CASE WHEN duration_category = 'very_long' THEN distance_km ELSE 0 END) AS very_long_dist,
-        SUM(CASE WHEN duration_category = 'very_long' THEN fuel_liters ELSE 0 END) AS very_long_fuel
-    FROM
-        cr_events_by_duration
     GROUP BY
         cycle_id
 ),
@@ -250,11 +247,14 @@ SELECT
     CASE WHEN short_fuel > 0 THEN short_dist / short_fuel ELSE NULL END AS short_cr_mileage_kmpl,
     CASE WHEN medium_fuel > 0 THEN medium_dist / medium_fuel ELSE NULL END AS medium_cr_mileage_kmpl,
     CASE WHEN long_fuel > 0 THEN long_dist / long_fuel ELSE NULL END AS long_cr_mileage_kmpl,
-    CASE WHEN very_long_fuel > 0 THEN very_long_dist / very_long_fuel ELSE NULL END AS very_long_cr_mileage_kmpl
+    CASE WHEN very_long_fuel > 0 THEN very_long_dist / very_long_fuel ELSE NULL END AS very_long_cr_mileage_kmpl,
+    CASE WHEN normal_fuel > 0 THEN normal_dist / normal_fuel ELSE NULL END AS normal_riding_mileage_kmpl
 FROM
-    cycle_mileage_agg cma
+    cycle_agg cma
 JOIN
     cycle_timestamps ts ON cma.cycle_id = ts.cycle_id
+WHERE -- Only include cycles that actually had at least one clutch riding event
+    cma.short_fuel > 0 OR cma.medium_fuel > 0 OR cma.long_fuel > 0 OR cma.very_long_fuel > 0
 ORDER BY
     ts.cycle_id;
 ```
