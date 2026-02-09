@@ -3,7 +3,7 @@ title: "Clutch Riding Analysis & Data Pipeline"
 subtitle: "Final Technical Product Requirements Document"
 author: "Data Science Team"
 date: "February 5, 2026"
-version: "3.4"
+version: "3.5"
 classification: "Internal Use"
 ---
 
@@ -15,7 +15,7 @@ classification: "Internal Use"
 This document provides a comprehensive technical specification for the automated data pipeline that analyzes vehicle telemetry data to detect clutch riding events, calculates their impact on fuel efficiency, and generates structured, queryable data tables with robust quality flagging.
 
 ## 1.2 Scope
-This document covers the end-to-end data pipeline, including data sources, detailed processing logic, data quality checks, the schema of the final output tables, and the design for the customer-facing report.
+This document covers the end-to-end data pipeline, including data sources, detailed processing logic, data quality checks, the schema of the final output tables, and the data models for the customer-facing report.
 
 # 2. Business Objective
 
@@ -51,9 +51,16 @@ graph TD
         G --> H[process_single_day];
     end
     
-    subgraph "Final Output"
-        H --> I[DB Table: clutch_riding_events];
-        H --> J[DB Table: clutch_riding_daily_summary];
+    subgraph "Data Warehouse Tables"
+        H --> I[Table: clutch_riding_events];
+        H --> J[Table: clutch_riding_daily_summary];
+    end
+
+    subgraph "Reporting Layer"
+        J -- and --> I;
+        I -- Aggregation Query --> K[Table: vehicle_clutch_riding_ranking];
+        J -- Direct Query --> L[Report: Cycle Drill-Down];
+        K -- Direct Query --> M[Report: Vehicle Ranking];
     end
 ```
 
@@ -130,21 +137,22 @@ The pipeline generates flags to identify questionable data without deleting it.
 
 <div style="page-break-after: always;"></div>
 
-# 6. OUTPUT SPECIFICATION
+# 6. Data Warehouse Output Specification
 
-The pipeline produces two primary, persistent tables in the database.
+The pipeline produces two primary, persistent tables in the data warehouse.
 
 ## 6.1 Output 1: Event-Level Table
-**Proposed Table Name:** `clutch_riding_events`
-**Description:** Contains one row for every detected riding event, designed for deep analysis.
+**Table Name:** `clutch_riding_events`
+**Description:** Contains one row for every detected riding event. This is the source of truth for all other aggregations.
 
 | Column Name | Data Type | Description |
 |---|---|---|
+| `event_id` | SERIAL | Primary Key |
 | `cycle_id` | VARCHAR | Foreign key to the engine cycle |
 | `uniqueid` | VARCHAR | Vehicle identifier |
 | `event_type` | VARCHAR | 'clutch_riding' or 'normal_riding' |
-| `event_start_ts`| INTEGER | Start timestamp of the event |
-| `event_end_ts` | INTEGER | End timestamp of the event |
+| `event_start_ts`| BIGINT | Start timestamp of the event |
+| `event_end_ts` | BIGINT | End timestamp of the event |
 | `event_duration_sec`| FLOAT | Duration of the event in seconds |
 | `event_distance_m`| FLOAT | Distance covered during the event in meters |
 | `event_fuel_from_rate_liters` | FLOAT | Fuel consumed (from `fuel_rate`) |
@@ -156,8 +164,8 @@ The pipeline produces two primary, persistent tables in the database.
 | `event_date` | DATE | The date the event occurred |
 
 ## 6.2 Output 2: Daily Summary Table
-**Proposed Table Name:** `clutch_riding_daily_summary`
-**Description:** Contains one row per vehicle per day, optimized for dashboards and reporting.
+**Table Name:** `clutch_riding_daily_summary`
+**Description:** Contains one row per vehicle per day, optimized for high-level dashboarding and drill-downs.
 
 | Column Name | Data Type | Description |
 |---|---|---|
@@ -171,79 +179,20 @@ The pipeline produces two primary, persistent tables in the database.
 | `is_short_distance_cycle` | BOOLEAN | `True` if total cycle distance is < 0.1 km |
 | `has_data_gap_flag` | BOOLEAN | `True` if time between packets exceeded 45 seconds |
 | `has_odometer_reset_flag`| BOOLEAN | `True` if the odometer reading went backward |
-
-## 6.3 SQL Schema Definitions
-Below are the `CREATE TABLE` statements for the two output tables.
-
-### 6.3.1 `clutch_riding_events`
-```sql
-CREATE TABLE clutch_riding_events (
-    event_id SERIAL PRIMARY KEY,
-    cycle_id VARCHAR(255),
-    uniqueid VARCHAR(255),
-    event_type VARCHAR(50),
-    event_start_ts BIGINT,
-    event_end_ts BIGINT,
-    event_duration_sec FLOAT,
-    event_distance_m FLOAT,
-    event_fuel_from_rate_liters FLOAT,
-    event_fuel_from_consumption_liters FLOAT,
-    avg_speed_kmh FLOAT,
-    avg_rpm FLOAT,
-    event_mileage_kmpl FLOAT,
-    is_invalid_mileage_flag BOOLEAN,
-    event_date DATE
-);
-```
-
-### 6.3.2 `clutch_riding_daily_summary`
-```sql
-CREATE TABLE clutch_riding_daily_summary (
-    analysis_date DATE,
-    uniqueid VARCHAR(255),
-    overall_distance_km FLOAT,
-    clutch_riding_mileage_kmpl FLOAT,
-    normal_riding_mileage_kmpl FLOAT,
-    mileage_degradation_pct FLOAT,
-    is_short_duration_cycle BOOLEAN,
-    is_short_distance_cycle BOOLEAN,
-    has_data_gap_flag BOOLEAN,
-    has_odometer_reset_flag BOOLEAN,
-    PRIMARY KEY (analysis_date, uniqueid)
-);
-```
+| | | **PRIMARY KEY (analysis_date, uniqueid)** |
 
 <div style="page-break-after: always;"></div>
 
-# 7. IMPLEMENTATION DETAILS
+# 7. Customer-Facing Reporting
 
-## 7.1 Key Dependencies
-- Python 3.x
-- Pandas
-- SQLAlchemy
-- Psycopg2
-- TQDM
+This section outlines the user interface (UI) and the data models required to power it.
 
-## 7.2 Execution Strategy
-The process is run within a Jupyter Notebook (`clutch_riding_production_7days.ipynb`). It uses a `ThreadPoolExecutor` to parallelize the processing of each cycle. A JSON file is used to track the processing status of each day.
-
-## 7.3 Data Destination
-The final dataframes are saved to CSV files. A separate process will be responsible for loading these CSVs into the final database tables.
-
-<div style="page-break-after: always;"></div>
-
-# 8. Customer-Facing Reporting
-
-This section outlines the user interface (UI) and user experience (UX) for presenting the clutch riding analysis to the customer.
-
-## 8.1 User Flow
+## 7.1 User Flow
 The customer will navigate to the feature via the main application dashboard:
 **`Dashboard` -> `Driver Behaviour` -> `Clutch Riding Analysis`**
 
-Upon selecting the feature, the customer will be presented with a multi-level report.
-
-## 8.2 Level 1: Fleet Summary
-The top of the page will display key performance indicators (KPIs) for the entire fleet over the selected time period.
+## 7.2 Level 1: Fleet Summary
+The top of the page will display KPIs for the entire fleet, calculated on-the-fly from the data warehouse tables. No separate table is required for this view.
 
 ---
 **Clutch Riding Fleet Overview**
@@ -254,22 +203,37 @@ The top of the page will display key performance indicators (KPIs) for the entir
 
 ---
 
-## 8.3 Level 2: Vehicle Ranking Table
-Below the fleet summary, a table will rank vehicles to identify the most significant offenders.
+## 7.3 Level 2: Vehicle Ranking Report
+Below the fleet summary, a table will rank vehicles to identify the most significant offenders. This report is powered by a dedicated reporting table, `vehicle_clutch_riding_ranking`, which is populated daily.
 
-**Ranking Logic:** Vehicles will be sorted in descending order by the **total duration of "Long" and "Very Long" clutch riding events**. This prioritizes vehicles with the most severe and impactful clutch riding habits.
+### 7.3.1 Reporting Table: `vehicle_clutch_riding_ranking`
+**Description:** A pre-aggregated table to store the daily ranking of vehicles based on clutch riding severity, ensuring fast report loading.
 
-**Vehicle Performance Ranking**
+| Column Name | Data Type | Description |
+|---|---|---|
+| `ranking_date` | DATE | The date the ranking was generated. |
+| `vehicle_id` | VARCHAR(255) | The unique identifier for the vehicle. |
+| `rank` | INT | The vehicle's rank on that day. |
+| `total_clutch_riding_hours` | FLOAT | Total hours spent clutch riding. |
+| `long_very_long_event_count` | INT | The number of severe clutch riding events. |
+| `fuel_wasted_liters` | FLOAT | Total fuel wasted from clutch riding. |
+| | | **PRIMARY KEY (ranking_date, vehicle_id)** |
 
-| Rank | Vehicle ID | Total Clutch Riding (Hours) | Long/Very Long Events (Count) | Fuel Wasted (Liters) |
-| :--- | :--- | :--- | :--- | :--- |
-| 1 | VEH-102 | 15.2 | 45 | 150.5 |
-| 2 | VEH-045 | 12.8 | 32 | 125.1 |
-| 3 | VEH-119 | 11.5 | 25 | 110.8 |
-| ... | ... | ... | ... | ... |
+### 7.3.2 SQL Schema
+```sql
+CREATE TABLE vehicle_clutch_riding_ranking (
+    ranking_date DATE,
+    vehicle_id VARCHAR(255),
+    rank INT,
+    total_clutch_riding_hours FLOAT,
+    long_very_long_event_count INT,
+    fuel_wasted_liters FLOAT,
+    PRIMARY KEY (ranking_date, vehicle_id)
+);
+```
 
-## 8.4 Level 3: Cycle-Level Drill-Down
-Clicking on a vehicle row in the ranking table will expand to show a detailed, cycle-by-cycle breakdown for that vehicle.
+## 7.4 Level 3: Cycle-Level Drill-Down
+Clicking on a vehicle row in the ranking table will show a detailed, cycle-by-cycle breakdown. This view is powered by a direct query on the `clutch_riding_daily_summary` table. No additional table is required.
 
 **Cycle Analysis for Vehicle: VEH-102**
 
