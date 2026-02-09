@@ -1,237 +1,240 @@
-# Clutch Riding Analysis - Technical PRD
-**Version:** 1.0
-**Date:** January 19, 2026
-**Purpose:** Generate day-wise clutch riding statistics per vehicle
-
+---
+title: "Clutch Riding Analysis & Data Pipeline"
+subtitle: "Final Technical Product Requirements Document"
+author: "Data Science Team"
+date: "February 5, 2026"
+version: "3.0"
+classification: "Internal Use"
 ---
 
-## 1. Objective
+<div style="page-break-after: always;"></div>
 
-Calculate daily clutch riding metrics (distance, fuel, mileage) for each vehicle and store in a final summary table for analysis and savings calculation.
+# 1. Document Overview
 
-**Hypothesis:** Clutch riding reduces fuel efficiency. By quantifying the impact, we can identify high-waste vehicles and calculate potential savings.
+## 1.1 Purpose
+This document provides a comprehensive technical specification for the automated data pipeline that analyzes vehicle telemetry data to detect clutch riding events, calculates their impact on fuel efficiency, and generates structured, queryable data tables with robust quality flagging.
 
----
+## 1.2 Scope
+This document covers the end-to-end data pipeline, including data sources, detailed processing logic, data quality checks, and the schema of the final output tables intended for analytical use and dashboarding.
 
-## 2. Data Flow
+# 2. Business Objective
 
-```
-PostgreSQL (obd_data_history)
-    ↓
-Fetch per vehicle, per day
-    ↓
-Forward fill (obddistance, fuel_consumption)
-    ↓
-Create event-based features (next - current)
-    ↓
-Detect clutch riding events
-    ↓
-Calculate statistics
-    ↓
-Final Output Table
-```
+## 2.1 Problem Statement
+Inefficient driver behavior, specifically "clutch riding," leads to measurable fuel waste and increased vehicle maintenance costs. A systematic, data-driven approach is required to identify, quantify, and flag this behavior at scale across the fleet to enable targeted interventions and cost-saving initiatives.
 
----
+## 2.2 Solution
+An automated pipeline, executed via a Jupyter Notebook (`clutch_riding_production_7days.ipynb`), that transforms raw telemetry into two structured, persistent database tables: one granular event-level table and one daily vehicle summary table, complete with data quality flags.
 
-## 3. Input Table
+## 2.3 Success Metrics
+- **Data Robustness:** The pipeline can successfully process any specified date range of historical data.
+- **Hypothesis Validation:** The final dataset clearly demonstrates a statistically significant negative correlation between clutch riding and fuel efficiency.
+- **Actionable Insight Generation:** The data proves that for "Long" and "Very Long" duration clutch riding events, mileage is worse than normal riding mileage in over 80% of observed cases.
 
-### Source: `public.obd_data_history`
+<div style="page-break-after: always;"></div>
 
-| Column | Type | Description | Unit |
-|--------|------|-------------|------|
-| `uniqueid` | VARCHAR | Vehicle ID | - |
-| `ts` | INTEGER | Unix timestamp | seconds |
-| `vehiclespeed` | NUMERIC | Vehicle speed | km/h |
-| `rpm` | NUMERIC | Engine RPM | rev/min |
-| `clutch_switch_status` | VARCHAR | Clutch status | Pressed/Released |
-| `accelerator_pedal_pos` | NUMERIC | Accelerator position | % |
-| `fuel_consumption` | NUMERIC | Cumulative fuel | liters |
-| `obddistance` | NUMERIC | Cumulative odometer | meters |
+# 3. System Overview
 
-**Query Strategy:** Per-vehicle queries for each day
-```sql
-SELECT * FROM obd_data_history
-WHERE ts >= :day_start AND ts < :day_end
-  AND uniqueid = :vehicle_id
-ORDER BY ts ASC
-```
+## 3.1 High-Level Architecture
+The system follows a two-stage database query process, followed by parallelized in-memory processing, and finally persists the results back to the database.
 
----
+```mermaid
+graph TD
+    subgraph "Data Sources"
+        A[OS_DB: engineoncycles] --> B;
+        C[tracking_db: obd_data_history];
+        D[tracking_db: obd_gear_data];
+    end
 
-## 4. Processing Steps
-
-### Step 1: Forward Fill
-Handle NULL values when vehicle is stationary
-```python
-df['obddistance'] = df['obddistance'].ffill()
-df['fuel_consumption'] = df['fuel_consumption'].ffill()
+    subgraph "Processing Pipeline (Jupyter)"
+        B(Get Cycles) --> E{For each cycle};
+        E --> F[Fetch OBD & Gear Data];
+        F --> G[process_cycle_data];
+        G --> H[process_single_day];
+    end
+    
+    subgraph "Final Output"
+        H --> I[DB Table: clutch_riding_events];
+        H --> J[DB Table: clutch_riding_daily_summary];
+    end
 ```
 
-### Step 2: Event-Based Feature Engineering
-Calculate changes between consecutive timestamps:
-```python
-event_distance = next_obddistance - current_obddistance  # meters
-event_fuel = next_fuel_consumption - current_fuel_consumption  # liters
-event_duration = next_ts - current_ts  # seconds
+# 4. Data Sources
+
+## 4.1 Input 1: Engine Cycles
+- **Database:** `OS_DB`
+- **Table:** `public.engineoncycles`
+- **Purpose:** Provides the list of trips (engine on-to-off cycles) to be analyzed.
+
+## 4.2 Input 2: OBD History
+- **Database:** `tracking_db`
+- **Table:** `public.obd_data_history`
+- **Purpose:** Provides the core time-series telemetry for each cycle.
+
+## 4.3 Input 3: Gear Data
+- **Database:** `tracking_db`
+- **Table:** `public.obd_gear_data`
+- **Purpose:** Provides the predicted gear for each timestamp.
+
+<div style="page-break-after: always;"></div>
+
+# 5. Processing Logic
+
+The core logic is executed by two main functions: `process_cycle_data` and `process_single_day`.
+
+## 5.1 `process_cycle_data` Flow
+This function processes the raw dataframe for a single cycle into a structured set of events and quality flags.
+
+```mermaid
+graph TD
+    subgraph "Input: Raw Cycle DataFrame"
+        A[Raw OBD & Gear Data];
+    end
+
+    subgraph "Processing Steps"
+        A --> B(Clean & Typecast Data);
+        B --> C(Calculate Interval Features: event_duration, event_distance);
+        C --> D(Detect Cycle-Level DQ Issues: Gaps, Odo Resets);
+        D --> E(Define 'is_clutch_riding' State);
+        E --> F(Create Event Groups based on state OR gear change);
+        F --> G(Aggregate each group into a single event row);
+        G --> H(Calculate Event-Level DQ Flag: 'is_invalid_mileage_flag');
+    end
+
+    subgraph "Output"
+        H --> I{Dictionary of 'all_events' DataFrame, 'data_quality' dict};
+    end
 ```
 
-**Validations:**
-- If `event_distance < 0` → set to 0 (odometer reset)
-- If `event_distance > 50,000m` → set to 0 (data error)
-- If `event_fuel < 0` → set to 0 (sensor error)
-
-### Step 3: Clutch Riding Detection
-Flag events where ALL conditions are met:
-```python
-is_clutch_riding = (
-    clutch_switch_status == 'Pressed' AND
-    vehiclespeed > 20 AND
-    accelerator_pedal_pos > 2
-)
-```
-
-### Step 4: Calculate Statistics
-Split data by `is_clutch_riding` flag:
-- **Clutch Riding Events**: where flag = TRUE
-- **Normal Riding Events**: where flag = FALSE
-- **Overall**: All events
-
-For each category, calculate:
-- Total distance (sum of event_distance, convert to km)
-- Total fuel (sum of event_fuel, in liters)
-- Mileage = distance_km / fuel_liters
-
----
-
-## 5. Output Table Structure
-
-### Final Table: `clutch_riding_daily_summary`
-
-| Column | Type | Description | Unit |
-|--------|------|-------------|------|
-| `analysis_date` | DATE | Date of analysis | YYYY-MM-DD |
-| `uniqueid` | VARCHAR | Vehicle identifier | - |
-| **Overall Metrics** | | | |
-| `overall_distance_km` | FLOAT | Total distance traveled | km |
-| `overall_fuel_liters` | FLOAT | Total fuel consumed | liters |
-| `overall_mileage_kmpl` | FLOAT | Overall fuel efficiency | km/L |
-| **Clutch Riding Metrics** | | | |
-| `clutch_riding_distance_km` | FLOAT | Distance with clutch riding | km |
-| `clutch_riding_fuel_liters` | FLOAT | Fuel during clutch riding | liters |
-| `clutch_riding_mileage_kmpl` | FLOAT | Mileage during clutch riding | km/L |
-| **Normal Riding Metrics** | | | |
-| `normal_riding_distance_km` | FLOAT | Distance without clutch riding | km |
-| `normal_riding_fuel_liters` | FLOAT | Fuel during normal riding | liters |
-| `normal_riding_mileage_kmpl` | FLOAT | Mileage during normal riding | km/L |
-| **Percentages** | | | |
-| `clutch_riding_distance_pct` | FLOAT | % of distance in clutch riding | % |
-| `clutch_riding_fuel_pct` | FLOAT | % of fuel used in clutch riding | % |
-| **Savings** | | | |
-| `fuel_savings_possible_liters` | FLOAT | Potential fuel savings | liters |
-| `monetary_savings_inr` | FLOAT | Potential money savings | ₹ |
-
----
-
-## 6. Savings Calculation Logic
+### 5.1.1 Data Quality Flagging (Packet-Level)
+Before cleaning the data, flags are generated by inspecting the raw interval differences.
 
 ```python
-# Calculate how much fuel SHOULD have been used
-fuel_should_have_used = clutch_riding_distance_km / normal_riding_mileage_kmpl
-
-# Calculate wasted fuel
-fuel_wasted = clutch_riding_fuel_liters - fuel_should_have_used
-
-# Potential savings
-fuel_savings_possible_liters = max(0, fuel_wasted)
-monetary_savings_inr = fuel_savings_possible_liters × 100  # ₹100/liter
+# In process_cycle_data:
+data_quality = {
+    'cycle_id': cycle_id,
+    'has_odometer_reset': (df['event_distance'] < 0).any(),
+    'has_data_gap': (df['event_duration'] > 45).any(),
+    'fuel_all_null': df['fuel_rate'].isna().all()
+}
+# Clean up invalid diffs after flagging
+df.loc[df['event_distance'] < 0, 'event_distance'] = 0
 ```
 
-**Interpretation:** If the driver had maintained normal riding efficiency during clutch riding segments, they would have saved X liters per day.
-
----
-
-## 7. Example Output
-
-| analysis_date | uniqueid | overall_distance_km | overall_fuel_liters | overall_mileage_kmpl | clutch_riding_distance_km | clutch_riding_fuel_liters | clutch_riding_mileage_kmpl | normal_riding_distance_km | normal_riding_fuel_liters | normal_riding_mileage_kmpl | clutch_riding_distance_pct | clutch_riding_fuel_pct | fuel_savings_possible_liters | monetary_savings_inr |
-|---------------|----------|---------------------|---------------------|----------------------|---------------------------|---------------------------|----------------------------|---------------------------|---------------------------|----------------------------|----------------------------|------------------------|------------------------------|----------------------|
-| 2026-01-15 | VEH001 | 185.5 | 15.2 | 12.2 | 28.4 | 3.5 | 8.1 | 157.1 | 11.7 | 13.4 | 15.3 | 23.0 | 1.38 | 138.00 |
-| 2026-01-15 | VEH002 | 165.0 | 18.5 | 8.9 | 62.3 | 9.8 | 6.4 | 102.7 | 8.7 | 11.8 | 37.8 | 53.0 | 4.52 | 452.00 |
-| 2026-01-15 | VEH003 | 142.8 | 12.1 | 11.8 | 5.2 | 0.6 | 8.7 | 137.6 | 11.5 | 12.0 | 3.6 | 5.0 | 0.17 | 17.00 |
-
----
-
-## 8. Data Quality Filters
-
-### Exclusion Criteria (vehicles NOT included in final table):
-
-| Criterion | Threshold | Reason |
-|-----------|-----------|--------|
-| Sample size | < 50 records | Insufficient data |
-| Fuel data quality | > 60% NULL | Cannot calculate mileage |
-| Clutch data quality | > 50% NULL | Cannot detect clutch riding |
-| Distance | < 10 km | Not statistically significant |
-
----
-
-## 9. Storage & Outputs
-
-### Output Files Generated:
-
-1. **`clutch_riding_statistics.xlsx`** - Complete statistics (all columns above)
-2. **`mileage_summary_filtered_10km.xlsx`** - Filtered for vehicles with >10 km distance
-3. **`dqm_report.xlsx`** - Data quality report
-4. **`failed_vehicles.xlsx`** - Vehicles excluded with reasons
-
-### File Format:
-- Excel (.xlsx) format
-- One row per vehicle per day
-- Generated daily at 03:00 AM
-- Retention: 90 days
-
----
-
-## 10. Technical Configuration
-
-| Parameter | Value |
-|-----------|-------|
-| Parallel workers | 10 |
-| Database pool size | 20 connections |
-| Retry attempts | 3 |
-| Processing mode | Per-vehicle, per-day |
-| Date processing order | Newest to oldest |
-
----
-
-## 11. Key Formulas
+### 5.1.2 Event Grouping Logic
+Events are created when the clutch riding status changes OR the predicted gear changes.
 
 ```python
-# Event calculation
-event_distance[i] = obddistance[i+1] - obddistance[i]
-event_fuel[i] = fuel_consumption[i+1] - fuel_consumption[i]
-
-# Mileage calculation
-mileage_kmpl = (sum(event_distance) / 1000) / sum(event_fuel)
-
-# Savings calculation
-savings_liters = clutch_fuel - (clutch_distance / normal_mileage)
-savings_inr = savings_liters × 100
+# In process_cycle_data:
+df['predicted_gear'] = df['predicted_gear'].ffill()
+df['event_group'] = ((df['is_clutch_riding'] != df['is_clutch_riding'].shift()) | (df['predicted_gear'] != df['predicted_gear'].shift())).cumsum()
 ```
 
----
+### 5.1.3 Event Aggregation & Flagging
+Each group is aggregated, and the invalid mileage flag is calculated.
 
-## 12. Success Criteria
+```python
+# In process_cycle_data, inside the event aggregation loop:
+mileage = (event_distance_m / 1000) / event_fuel_liters if event_fuel_liters > 0 else 0
 
-**Per Vehicle:**
-- ✅ Daily statistics generated
-- ✅ Clutch riding distance, fuel, and mileage calculated
-- ✅ Savings potential quantified
-- ✅ Stored in final table
+event = {
+    # ... other fields
+    'event_mileage_from_rate_kmpl': mileage,
+    'is_invalid_mileage_flag': (mileage > 15) or (event_fuel_liters <= 0 and event_distance_m > 1)
+}
+```
 
-**Fleet-Wide:**
-- ✅ > 85% of vehicles successfully processed
-- ✅ All output files generated
-- ✅ Processing completes in < 10 minutes
+## 5.2 `process_single_day` Flow
+This function orchestrates the processing for all cycles on a given day and generates the final summary tables.
 
----
+```mermaid
+graph TD
+    A(Get all cycles for a specific day) --> B{For each cycle...};
+    B -- in parallel --> C(process_and_summarize_cycle);
+    C --> D(Collect lists of events & summaries);
+    D --> E(End Loop);
+    E --> F[Concatenate lists into final DataFrames];
+    F --> G[Save DataFrames to CSV];
+```
 
-**End of Document**
+### 5.2.1 Cycle Summary Generation
+Inside the main processing loop, a summary row is created for each cycle, including the cycle-level flags.
+
+```python
+# In process_single_day, inside the processing loop for a cycle:
+cycle_summary = {
+    'cycle_date': analysis_date,
+    'cycle_id': cycle_row['cycle_id'],
+    'uniqueid': cycle_row['uniqueid'],
+    # ... overall metrics ...
+    'clutch_riding_mileage_kmpl': round(clutch_mileage_kmpl, 2),
+    'normal_riding_mileage_kmpl': round(normal_mileage_kmpl, 2),
+    # ... degradation metrics ...
+
+    # Final Validation Flags
+    'is_short_duration_cycle': cycle_row['cycle_duration_sec'] < 60,
+    'is_short_distance_cycle': overall_distance_km < 0.1,
+    'has_data_gap_flag': dq_dict['has_data_gap'],
+    'has_odometer_reset_flag': dq_dict['has_odometer_reset']
+}
+```
+
+<div style="page-break-after: always;"></div>
+
+# 6. OUTPUT SPECIFICATION
+
+The pipeline produces two primary, persistent tables in the database.
+
+## 6.1 Output 1: Event-Level Table
+**Proposed Table Name:** `clutch_riding_events`
+**Description:** Contains one row for every detected riding event, designed for deep analysis.
+
+| Column Name | Data Type | Description |
+|---|---|---|
+| `cycle_id` | VARCHAR | Foreign key to the engine cycle |
+| `uniqueid` | VARCHAR | Vehicle identifier |
+| `event_type` | VARCHAR | 'clutch_riding' or 'normal_riding' |
+| `event_start_ts`| INTEGER | Start timestamp of the event |
+| `event_end_ts` | INTEGER | End timestamp of the event |
+| `event_duration_sec`| FLOAT | Duration of the event in seconds |
+| `event_distance_m`| FLOAT | Distance covered during the event in meters |
+| `event_fuel_from_rate_liters` | FLOAT | Fuel consumed (from `fuel_rate`) |
+| `avg_speed_kmh` | FLOAT | Average speed during the event |
+| `avg_rpm` | FLOAT | Average RPM during the event |
+| `gear` | INTEGER | The gear the event occurred in |
+| `event_mileage_from_rate_kmpl`| FLOAT | Mileage (km/L) for the event |
+| `is_invalid_mileage_flag` | BOOLEAN | `True` if mileage is > 15 or fuel/distance is zero. |
+| `event_date` | DATE | The date the event occurred |
+
+## 6.2 Output 2: Daily Summary Table
+**Proposed Table Name:** `clutch_riding_daily_summary`
+**Description:** Contains one row per vehicle per day, optimized for dashboards and reporting.
+
+| Column Name | Data Type | Description |
+|---|---|---|
+| `analysis_date` | DATE | Date of analysis |
+| `uniqueid` | VARCHAR | Vehicle identifier |
+| `overall_distance_km`| FLOAT | Total distance traveled |
+| `clutch_riding_mileage_kmpl`| FLOAT | Mileage during clutch riding |
+| `normal_riding_mileage_kmpl`| FLOAT | Mileage during normal riding |
+| `mileage_degradation_pct`| FLOAT | Percentage drop in mileage due to clutch riding |
+| `is_short_duration_cycle` | BOOLEAN | `True` if total cycle duration is < 60 seconds |
+| `is_short_distance_cycle` | BOOLEAN | `True` if total cycle distance is < 0.1 km |
+| `has_data_gap_flag` | BOOLEAN | `True` if time between packets exceeded 45 seconds |
+| `has_odometer_reset_flag`| BOOLEAN | `True` if the odometer reading went backward |
+
+<div style="page-break-after: always;"></div>
+
+# 7. IMPLEMENTATION DETAILS
+
+## 7.1 Key Dependencies
+- Python 3.x
+- Pandas
+- SQLAlchemy
+- Psycopg2
+- TQDM
+
+## 7.2 Execution Strategy
+The process is run within a Jupyter Notebook (`clutch_riding_production_7days.ipynb`). It uses a `ThreadPoolExecutor` to parallelize the processing of each cycle. A JSON file is used to track the processing status of each day.
+
+## 7.3 Data Destination
+The final dataframes (`final_events_df`, `final_cycles_df`) are saved to CSV files in a daily batch directory. A separate process will be responsible for loading these CSVs into the final database tables.
