@@ -43,7 +43,7 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 
 ---
 
-## 4. System Overview — Two-Phase Architecture
+## 4. System Overview — Two-Step Architecture
 
 ```
 idling_history (DB)  ──┐
@@ -57,7 +57,7 @@ obd_data_history               ──┘
 
 ---
 
-### 4.1 Phase 1 — Idle Profiler API
+### 4.1 Step 1 — Idle Profiler API
 
 **Purpose:** Expose a service that accepts idling event rows for a set of vehicles, computes per-vehicle idle RPM and engine load bands from OBD telemetry, and returns a profile per vehicle.
 
@@ -94,7 +94,7 @@ obd_data_history               ──┘
 
 ---
 
-### 4.2 Phase 2 — Free Wheeling Detector API
+### 4.2 Step 2 — Free Wheeling Detector API
 
 **Purpose:** Expose a service that accepts idle profiles (from Phase 1) and a detection date range, fetches engine-on cycles and OBD telemetry directly from the database, and returns detected free-wheeling events per vehicle.
 
@@ -149,11 +149,11 @@ obd_data_history               ──┘
 
 | Source | Type | Host:Port | Used In |
 |--------|------|-----------|---------|
-| `obd_data_history` | PostgreSQL table | tracking_db:5435 | Phase 1 + Phase 2 |
-| `engineoncycles` | PostgreSQL table | os_db:5436 | Phase 2 |
-| `idling_history` | PostgreSQL table | TBD | Phase 1 (API input) |
+| `obd_data_history` | PostgreSQL table | tracking_db | Step 1 + Step 2 |
+| `engineoncycles` | PostgreSQL table | os_db | Step 2 |
+| `idling_history` | PostgreSQL table | tracking_db | Step 1 (API input) |
 
-**Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_pos` (DB column name; aliased to `accelerator_pedal_position` in processing), `obddistance`, `fuel_consumption`
+**Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_pos` , `obddistance`, `fuel_consumption`
 
 **Key engineoncycles columns used:** `cycle_id`, `uniqueid`, `cycle_start_ts`, `cycle_end_ts`, `cycle_date`
 
@@ -163,5 +163,5 @@ obd_data_history               ──┘
 
 | Artifact | Phase | Stored To | Description |
 |----------|-------|-----------|-------------|
-| Phase 1 API response | 1 | `free-wheeling-profile` | Per-vehicle idle profile: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
-| Phase 2 API response | 2 | `free-wheeling-events` | Detected free-wheeling events: `free_wheeling_id`, `uniqueid`, `start_ts`, `end_ts`, `duration_s`, `distance_km`, `avg_speed_kmph`, `flag_short_event` |
+| Step 1 API response | 1 | `free-wheeling-profile` | Per-vehicle idle profile: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
+| Step 2 API response | 2 | `free-wheeling-events` | Detected free-wheeling events: `free_wheeling_id`, `uniqueid`, `start_ts`, `end_ts`, `duration_s`, `distance_km`, `avg_speed_kmph`, `flag_short_event` |
