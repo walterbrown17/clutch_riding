@@ -117,8 +117,8 @@ obd_data_history               ──┘
 
 | Condition | Expression | Threshold | Used in |
 |-----------|-----------|-----------|---------|
-| `rpm_ok` | `rpm` between `[rpm-low, rpm-high]` | from Phase 1 profile | Start only |
-| `load_ok` | `engineload` between `[engineload-low, engineload-high]` | from Phase 1 profile | Start only |
+| `rpm_ok` | `rpm` between `[rpm-low, rpm-high]` | from Step 1 profile | Start only |
+| `load_ok` | `engineload` between `[engineload-low, engineload-high]` | from Step 1 profile | Start only |
 | `acc_start` | `accelerator_pedal_position == 0` | hardcoded | Start only |
 | `acc_cont` | `accelerator_pedal_position <= 2` | hardcoded | Continue only |
 | `speed_ok` | `vehiclespeed > MIN_SPEED_KMPH (5)` | hardcoded | Start + Continue |
