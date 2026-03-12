@@ -47,12 +47,6 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 - Build **adaptive idle profiles per vehicle** (not global thresholds) so detection accounts for engine-to-engine variation
 - Support fleet-wide reporting and driver coaching
 
-### Non-Goals *(current phase)*
-- Real-time alerting — batch offline detection only
-- Non-OBD vehicles
-- Writing results to a production database — outputs remain in DataFrames / CSV files
-
----
 
 ## 4. System Overview — Two-Phase Architecture
 
