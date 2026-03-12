@@ -1,7 +1,3 @@
-# PRD: Free-Wheeling Detection System
-
----
-
 ## 1. Executive Summary
 
 Heavy commercial trucks that coast in neutral while moving — "free-wheeling" — create safety hazards, accelerate mechanical wear, violate regulations, and signal poor driver technique. Yet today, no automated system detects or reports these events across the fleet.
@@ -12,6 +8,54 @@ This document describes a two-phase batch detection system that builds a per-veh
 
 ---
 
+## 2. Problem Statement
+
+### What is Free-Wheeling?
+
+Free-wheeling occurs when a truck is physically moving but the engine is only idling — not producing drive torque. The engine is effectively disconnected from the drivetrain while the vehicle coasts (typically downhill or when decelerating).
+
+### Why it Matters
+
+#### 2.1 Safety *(most critical for heavy vehicles)*
+- **Loss of engine braking** — on downhill gradients the driver relies entirely on friction brakes
+- **Brake overheating / fade** — prolonged friction-only braking causes brake fade, significantly increasing stopping distance
+- **Reduced vehicle control** — lower stability on curves or wet/slippery roads without engine drag
+- **Longer stopping distances** — directly increases accident risk
+
+#### 2.2 Mechanical Wear
+- **Accelerated brake pad & disc wear** — over-reliance on friction brakes instead of engine braking
+- **Turbocharger stress** — sudden re-engagement after free-wheeling can cause oil starvation or surge
+- **Transmission stress** — abrupt clutch engagement after coasting puts shock load on the gearbox
+
+#### 2.3 Regulatory / Compliance
+- Free-wheeling in neutral is **illegal for heavy commercial vehicles** in several jurisdictions, including India under CMVR rules
+- Violates fleet safety SOPs and OEM operating guidelines
+
+#### 2.4 Driver Behavior
+- Strong indicator of poor driving technique or fatigue
+- Can correlate with other risky behaviors (harsh braking, over-speeding)
+
+### Current Gap
+
+No automated detection exists. Free-wheeling events go undetected and unreported across the fleet.
+
+**Scope:** OBD-equipped vehicles only (`solution_type` filter applied).
+
+---
+
+## 3. Goals and Non-Goals
+
+### Goals
+- Detect free-wheeling events per vehicle per day using OBD telemetry
+- Build **adaptive idle profiles per vehicle** (not global thresholds) so detection accounts for engine-to-engine variation
+- Support fleet-wide reporting and driver coaching
+
+### Non-Goals *(current phase)*
+- Real-time alerting — batch offline detection only
+- Non-OBD vehicles
+- Writing results to a production database — outputs remain in DataFrames / CSV files
+
+---
 
 ## 4. System Overview — Two-Phase Architecture
 
