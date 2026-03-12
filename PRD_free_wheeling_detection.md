@@ -161,7 +161,7 @@ obd_data_history               ──┘
 
 ## 6. Output Artifacts
 
-| Artifact | Phase | Stored To | Description |
+| Artifact | Step | Stored To | Description |
 |----------|-------|-----------|-------------|
 | Step 1 API response | 1 | `free-wheeling-profile` | Per-vehicle idle profile: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
 | Step 2 API response | 2 | `free-wheeling-events` | Detected free-wheeling events: `free_wheeling_id`, `uniqueid`, `start_ts`, `end_ts`, `duration_s`, `distance_km`, `avg_speed_kmph`, `flag_short_event` |
