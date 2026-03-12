@@ -61,8 +61,8 @@ No automated detection exists. Free-wheeling events go undetected and unreported
 
 ```
 idling_history (DB)  ──┐
-                       |──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
-obd_data_history     ──┘                                          engineload-low, engineload-high }
+obd_data_history     ──┴──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
+                                                                   engineload-low, engineload-high }
 
 idle profiles (API output) ──┐
 engineoncycles             ──┤──► [ Phase 2: Free Running Detector ] ──► free_running_df
@@ -83,9 +83,8 @@ obd_data_history           ──┘
 | **Output** | One record per vehicle: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
 
 **Internal logic:**
-1. Receive idling event rows; merge vehicle metadata (`solution_type`) from `vehicle_info.csv`
-2. Filter to OBD-equipped vehicles (`solution_type`)
-3. For each vehicle, fetch OBD rows from `obd_data_history` that fall within each idling window
+1. Receive idling event rows from the `idling_history` table
+2. For each vehicle, fetch OBD rows from `obd_data_history` that fall within each idling window
 4. Discard events with fewer than `MIN_OBD_ROWS = 3` OBD rows
 5. Discard events where the average signal exceeds any threshold:
    - `avg_rpm > MAX_IDLE_RPM (1000)`
@@ -158,7 +157,6 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 | `obd_data_history` | PostgreSQL table | tracking_db:5435 | Phase 1 + Phase 2 |
 | `engineoncycles` | PostgreSQL table | os_db:5436 | Phase 2 |
 | `idling_history` | PostgreSQL table | TBD | Phase 1 (API input) |
-| `vehicle_info.csv` | CSV file | local | Phase 1 |
 
 **Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`, `obddistance`, `fuel_consumption`
 
@@ -224,7 +222,6 @@ These are known weaknesses to address before productionization.
 | Constraint | Detail |
 |------------|--------|
 | OBD vehicles only | Detection requires `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`; non-OBD vehicles are excluded |
-| `vehicle_info.csv` still required | Phase 1 API still depends on a manually provided `vehicle_info.csv` for solution type filtering; no automated pipeline for this file |
 | Batch only | No real-time detection; minimum latency is one full batch run after the detection window closes |
 | DB credentials in notebook | Credentials are hardcoded — a security risk for any production deployment |
 | No production DB write | Results are written only to local CSVs; integration into a reporting database is out of scope for this phase |
@@ -239,7 +236,7 @@ These are known weaknesses to address before productionization.
 3. **Re-profiling cadence:** Should idle profiles be rebuilt weekly, monthly, or event-triggered (e.g., after an engine replacement flag)?
 4. **Short event policy:** Should events shorter than `MIN_EVENT_DURATION_S` be excluded from reports entirely, kept with a warning flag, or reported in a separate low-confidence tier?
 5. **Labeled dataset:** What source of ground truth can be used to measure precision and recall? (Options: dashcam review, driver self-report, matched gear position data if available)
-6. **`vehicle_info` pipeline:** `vehicle_info.csv` is still a manual input — should it be replaced with a DB table or API call so the Phase 1 API is fully self-contained?
+6. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
 7. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
 
 ---
