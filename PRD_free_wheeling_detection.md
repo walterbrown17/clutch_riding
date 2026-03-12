@@ -47,11 +47,11 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 
 ```
 idling_history (DB)  ──┐
-obd_data_history     ──┴──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
+obd_data_history     ──┴──► [ Step 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
                                                                    engineload-low, engineload-high }
 
 idle profiles (Phase 1 output) ──┐
-engineoncycles                 ──┤──► [ Phase 2: Free Wheeling Detector API ] ──► { free_wheeling events }
+engineoncycles                 ──┤──► [ Step 2: Free Wheeling Detector API ] ──► { free_wheeling events }
 obd_data_history               ──┘
 ```
 
