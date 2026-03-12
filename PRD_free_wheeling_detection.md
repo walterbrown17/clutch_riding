@@ -40,8 +40,7 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 
 ---
 
-## 3. Goals and Non-Goals
-
+## 3. Goals
 ### Goals
 - Detect free-wheeling events per vehicle per day using OBD telemetry
 - Build **adaptive idle profiles per vehicle** (not global thresholds) so detection accounts for engine-to-engine variation
