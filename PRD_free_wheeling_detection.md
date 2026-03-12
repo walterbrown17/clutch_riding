@@ -42,6 +42,7 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 
 ---
 
+
 ## 4. System Overview — Two-Phase Architecture
 
 ```
@@ -49,9 +50,9 @@ idling_history (DB)  ──┐
 obd_data_history     ──┴──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
                                                                    engineload-low, engineload-high }
 
-idle profiles (API output) ──┐
-engineoncycles             ──┤──► [ Phase 2: Free Running Detector ] ──► free_running_df
-obd_data_history           ──┘
+idle profiles (Phase 1 output) ──┐
+engineoncycles                 ──┤──► [ Phase 2: Free Running Detector API ] ──► { free_running events }
+obd_data_history               ──┘
 ```
 
 ---
@@ -93,19 +94,21 @@ obd_data_history           ──┘
 
 ---
 
-### 4.2 Phase 2 — Free Running Detector
+### 4.2 Phase 2 — Free Running Detector API
 
-**Purpose:** Scan OBD telemetry within engine-on cycles and tag windows where the truck is moving at idle.
+**Purpose:** Expose a service that accepts idle profiles (from Phase 1) and a detection date range, fetches engine-on cycles and OBD telemetry directly from the database, and returns detected free-wheeling events per vehicle.
 
-**Inputs:**
-- `idle_profiles_df` — output of Phase 1
-- `engineoncycles` (PostgreSQL, os_db) — engine-on cycle windows per vehicle
-- `obd_data_history` (PostgreSQL, tracking_db) — raw OBD telemetry
+**API contract:**
 
-**Logic:**
-1. Fetch engine-on cycles for the detection date range
-2. Drop cycles for vehicles without an idle profile
-3. For each cycle, fetch OBD rows and run the state machine (below)
+| | Detail |
+|--|--------|
+| **Input** | Idle profiles from Phase 1 (`uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high`) + detection date range (`start_date`, `end_date`) |
+| **Output** | Detected free-wheeling events: `free_running_id`, `uniqueid`, `start_ts`, `end_ts`, `duration_s`, `distance_km`, `avg_speed_kmph`, `flag_short_event` |
+
+**Internal logic:**
+1. Fetch engine-on cycles for the detection date range from `engineoncycles` (DB)
+2. Drop cycles for vehicles not present in the provided idle profiles
+3. For each cycle, fetch OBD rows from `obd_data_history` (DB) and run the state machine (below)
 4. Tag detected event rows with a `free_running_id`
 5. Flag events shorter than `MIN_EVENT_DURATION_S` with `flag_short_event = True` (not dropped)
 
@@ -131,7 +134,6 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 | `MIN_EVENT_DURATION_S` | 10 | Events shorter than this are flagged (not dropped) |
 | `MIN_SPEED_KMPH` | 5 | Speed below which the vehicle is treated as stopped |
 | `NOISE_PATIENCE` | 2 | Consecutive bad packets tolerated before ending an event |
-| `SAVE_EVERY` | 500 | Cycles between checkpoint saves (parquet batches) |
 
 ---
 
@@ -151,14 +153,10 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 
 ## 6. Output Artifacts
 
-| Artifact | Format | Description |
-|----------|--------|-------------|
-| Phase 1 API response | JSON / DataFrame | Per-vehicle: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
-| `idle_profiles.csv` | CSV | Optional export of Phase 1 API output for inspection / audit |
-| `free_running_df` | DataFrame | All OBD rows within detected events, tagged with `free_running_id` and `flag_short_event` |
-| `free_running_detection.csv` | CSV | Export of `free_running_df` |
-| `event_summary` | DataFrame | One row per event: `free_running_id`, vehicle, start/end timestamps, duration (s), distance (km), fuel consumed (L), average speed |
-| `phase2_checkpoints/` | Parquet batches | Resume state — allows re-running without reprocessing completed cycles |
+| Artifact | Phase | Description |
+|----------|-------|-------------|
+| Phase 1 API response | 1 | Per-vehicle idle profile: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
+| Phase 2 API response | 2 | Detected free-wheeling events: `free_running_id`, `uniqueid`, `start_ts`, `end_ts`, `duration_s`, `distance_km`, `avg_speed_kmph`, `flag_short_event` |
 
 ---
 
@@ -195,8 +193,7 @@ These are known weaknesses to address before productionization.
 
 ## 9. Performance and Scalability
 
-- **Parallel fetching:** `MAX_WORKERS = 8` concurrent DB connections for Phase 1 OBD fetching
-- **Checkpoint-resume:** Phase 2 saves progress every `SAVE_EVERY = 500` cycles to `phase2_checkpoints/` as parquet batches; interrupted runs can resume without re-processing completed cycles
+- **Parallel fetching:** `MAX_WORKERS = 8` concurrent DB connections for OBD fetching in both phases
 - **In-memory per cycle:** Each engine-on cycle is processed independently; the full dataset is never loaded into memory at once
 - **Connection pools:** tracking_db uses a `ThreadedConnectionPool`; os_db uses a single read-only connection
 
@@ -208,9 +205,8 @@ These are known weaknesses to address before productionization.
 |------------|--------|
 | OBD vehicles only | Detection requires `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`; non-OBD vehicles are excluded |
 | Batch only | No real-time detection; minimum latency is one full batch run after the detection window closes |
-| DB credentials in notebook | Credentials are hardcoded — a security risk for any production deployment |
-| No production DB write | Results are written only to local CSVs; integration into a reporting database is out of scope for this phase |
-| Idling history window | Profile quality depends on the recency and volume of idling events in the CSV; stale or sparse data reduces detection reliability |
+| DB credentials in API | Credentials must be managed via environment variables or a secrets manager before production deployment |
+| Idling history window | Profile quality depends on the recency and volume of idling events in the `idling_history` table; stale or sparse data reduces detection reliability |
 
 ---
 
@@ -222,7 +218,6 @@ These are known weaknesses to address before productionization.
 4. **Short event policy:** Should events shorter than `MIN_EVENT_DURATION_S` be excluded from reports entirely, kept with a warning flag, or reported in a separate low-confidence tier?
 5. **Labeled dataset:** What source of ground truth can be used to measure precision and recall? (Options: dashcam review, driver self-report, matched gear position data if available)
 6. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
-7. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
 
 ---
 
@@ -230,6 +225,7 @@ These are known weaknesses to address before productionization.
 
 - [ ] All threshold values cross-checked against `free_running_detection.ipynb` (confirmed: `MIN_OBD_ROWS=3`, `MIN_VALID_EVENTS=5`, `MAX_IDLE_RPM=1000`, `MAX_IDLE_ENGINE_LOAD=35`, `MAX_IDLE_ACC_PEDAL=2`, `MIN_EVENT_DURATION_S=10`, `MIN_SPEED_KMPH=5`, `NOISE_PATIENCE=2`, `MAX_WORKERS=8`, `SAVE_EVERY=500`)
 - [ ] Phase 1 API contract confirmed: input = `idling_history` table rows; output = `uniqueid, rpm-low, rpm-high, engineload-low, engineload-high`
+- [ ] Phase 2 API contract confirmed: input = Phase 1 profiles + date range; output = free-wheeling event records
 - [ ] `idling_history` table schema and host/port confirmed with data engineering
 - [ ] State machine logic (start vs. continue conditions, noise patience back-dating) reviewed against notebook code
 - [ ] NULL handling behavior for `load_ok` / `acc_ok` confirmed against notebook (`np.ones` fallback)
