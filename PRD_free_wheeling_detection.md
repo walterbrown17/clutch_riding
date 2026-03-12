@@ -12,79 +12,45 @@ This document describes a two-phase batch detection system that builds a per-veh
 
 ---
 
-## 2. Problem Statement
-
-### What is Free-Wheeling?
-
-Free-wheeling occurs when a truck is physically moving but the engine is only idling — not producing drive torque. The engine is effectively disconnected from the drivetrain while the vehicle coasts (typically downhill or when decelerating).
-
-### Why it Matters
-
-#### 2.1 Safety *(most critical for heavy vehicles)*
-- **Loss of engine braking** — on downhill gradients the driver relies entirely on friction brakes
-- **Brake overheating / fade** — prolonged friction-only braking causes brake fade, significantly increasing stopping distance
-- **Reduced vehicle control** — lower stability on curves or wet/slippery roads without engine drag
-- **Longer stopping distances** — directly increases accident risk
-
-#### 2.2 Mechanical Wear
-- **Accelerated brake pad & disc wear** — over-reliance on friction brakes instead of engine braking
-- **Turbocharger stress** — sudden re-engagement after free-wheeling can cause oil starvation or surge
-- **Transmission stress** — abrupt clutch engagement after coasting puts shock load on the gearbox
-
-#### 2.3 Regulatory / Compliance
-- Free-wheeling in neutral is **illegal for heavy commercial vehicles** in several jurisdictions, including India under CMVR rules
-- Violates fleet safety SOPs and OEM operating guidelines
-
-
-**Scope:** OBD-equipped vehicles only (`solution_type` filter applied).
-
----
-
-## 3. Goals
-### Goals
-- Detect free-wheeling events per vehicle per day using OBD telemetry
-- Build **adaptive idle profiles per vehicle** (not global thresholds) so detection accounts for engine-to-engine variation
-- Support fleet-wide reporting and driver coaching
-
 
 ## 4. System Overview — Two-Phase Architecture
 
 ```
-idling_history.csv  ──┐
-vehicle_info.csv    ──┤──► [ Phase 1: Idle Profiler ] ──► idle_profiles_df
-obd_data_history    ──┘
+idling_history (DB)  ──┐
+vehicle_info.csv     ──┤──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
+obd_data_history     ──┘                                          engineload-low, engineload-high }
 
-idle_profiles_df    ──┐
-engineoncycles      ──┤──► [ Phase 2: Free Running Detector ] ──► free_running_df
-obd_data_history    ──┘
+idle profiles (API output) ──┐
+engineoncycles             ──┤──► [ Phase 2: Free Running Detector ] ──► free_running_df
+obd_data_history           ──┘
 ```
 
 ---
 
-### 4.1 Phase 1 — Idle Profiler
+### 4.1 Phase 1 — Idle Profiler API
 
-**Purpose:** Build a per-vehicle statistical fingerprint of what "genuine idling" looks like for each truck.
+**Purpose:** Expose a service that accepts idling event rows for a set of vehicles, computes per-vehicle idle RPM and engine load bands from OBD telemetry, and returns a profile per vehicle.
 
-**Inputs:**
-- `idling_history.csv` — known idling event windows (start/end timestamps per vehicle)
-- `vehicle_info.csv` — vehicle metadata (client name, solution type)
-- `obd_data_history` (PostgreSQL, tracking_db) — raw OBD telemetry
+**API contract:**
 
-**Logic:**
-1. Load idling events and vehicle metadata; merge on `uniqueid`
+| | Detail |
+|--|--------|
+| **Input** | Rows from the `idling_history` table (one row per known idling event: `uniqueid`, `starttime`, `endtime`) |
+| **Output** | One record per vehicle: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
+
+**Internal logic:**
+1. Receive idling event rows; merge vehicle metadata (`solution_type`) from `vehicle_info.csv`
 2. Filter to OBD-equipped vehicles (`solution_type`)
-3. For each vehicle, fetch OBD rows that fall within each idling window
+3. For each vehicle, fetch OBD rows from `obd_data_history` that fall within each idling window
 4. Discard events with fewer than `MIN_OBD_ROWS = 3` OBD rows
 5. Discard events where the average signal exceeds any threshold:
    - `avg_rpm > MAX_IDLE_RPM (1000)`
    - `avg_engineload > MAX_IDLE_ENGINE_LOAD (35)`
    - `avg_accelerator > MAX_IDLE_ACC_PEDAL (2)`
 6. If the vehicle has at least `MIN_VALID_EVENTS = 5` clean events, compute percentile bands:
-   - `idle_rpm_p25`, `idle_rpm_p75`
-   - `idle_engineload_p25`, `idle_engineload_p75`
-   - `idle_accelerator_p75`
-
-**Output:** `idle_profiles_df` — one row per vehicle with idle signal bands
+   - `rpm-low` = `idle_rpm_p25`, `rpm-high` = `idle_rpm_p75`
+   - `engineload-low` = `idle_engineload_p25`, `engineload-high` = `idle_engineload_p75`
+7. Vehicles with fewer than `MIN_VALID_EVENTS` valid events are excluded from the output (cold-start problem — see Refinement Area #6)
 
 **Configuration parameters:**
 
@@ -94,7 +60,7 @@ obd_data_history    ──┘
 | `MIN_VALID_EVENTS` | 5 | Minimum clean events needed to build a profile |
 | `MAX_IDLE_RPM` | 1000 | RPM ceiling for a valid idling event |
 | `MAX_IDLE_ENGINE_LOAD` | 35 | Engine load ceiling (%) for a valid idling event |
-| `MAX_IDLE_ACC_PEDAL` | 2 | Accelerator pedal ceiling (%) for a valid idling event |
+| `MAX_IDLE_ACC_PEDAL` | 2 | Accelerator pedal ceiling (%) for a valid idling event (used for filtering only, not in output) |
 | `MAX_WORKERS` | 8 | Parallel DB threads for OBD fetching |
 
 ---
@@ -147,7 +113,7 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 |--------|------|-----------|---------|
 | `obd_data_history` | PostgreSQL table | tracking_db:5435 | Phase 1 + Phase 2 |
 | `engineoncycles` | PostgreSQL table | os_db:5436 | Phase 2 |
-| `idling_history.csv` | CSV file | local | Phase 1 |
+| `idling_history` | PostgreSQL table | TBD | Phase 1 (API input) |
 | `vehicle_info.csv` | CSV file | local | Phase 1 |
 
 **Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`, `obddistance`, `fuel_consumption`
@@ -160,8 +126,8 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 
 | Artifact | Format | Description |
 |----------|--------|-------------|
-| `idle_profiles_df` | DataFrame | Per-vehicle idle bands (P25/P75 for RPM, load, accelerator) |
-| `idle_profiles.csv` | CSV | Export of `idle_profiles_df` |
+| Phase 1 API response | JSON / DataFrame | Per-vehicle: `uniqueid`, `rpm-low`, `rpm-high`, `engineload-low`, `engineload-high` |
+| `idle_profiles.csv` | CSV | Optional export of Phase 1 API output for inspection / audit |
 | `free_running_df` | DataFrame | All OBD rows within detected events, tagged with `free_running_id` and `flag_short_event` |
 | `free_running_detection.csv` | CSV | Export of `free_running_df` |
 | `event_summary` | DataFrame | One row per event: `free_running_id`, vehicle, start/end timestamps, duration (s), distance (km), fuel consumed (L), average speed |
@@ -179,7 +145,7 @@ These are known weaknesses to address before productionization.
 | 2 | **Fixed percentile bands** | P25–P75 was chosen heuristically. For vehicles with tightly-clustered idle signals the band may be too wide, accepting non-idle states; for noisy vehicles it may be too narrow, missing real idle. | Evaluate P10–P90 and adaptive width (e.g., IQR-based); measure impact on per-vehicle false positive rate |
 | 3 | **NOISE_PATIENCE tuning** | Value of 2 is not empirically validated. Too low → events broken by single bad OBD packets; too high → non-free-wheeling intervals absorbed into events. | A/B test on a manually labeled sample; measure event fragmentation rate |
 | 4 | **MIN_EVENT_DURATION_S** | 10 s threshold was not validated against real events. Short events may be GPS/OBD noise; very long events are the highest safety risk. | Determine threshold from labeled data; consider separate reporting tiers (warn vs. critical) |
-| 5 | **Profile staleness** | Idle profiles are built from a historical CSV with no automated refresh. A vehicle's idle characteristics may change (engine wear, recalibration). | Define a re-profiling schedule (weekly or monthly); automate CSV ingestion or replace with a DB query |
+| 5 | **Profile staleness** | Idle profiles are computed from the `idling_history` table but with no defined refresh cadence. A vehicle's idle characteristics may change (engine wear, recalibration). | Define a re-profiling schedule (weekly or monthly); the API caller is responsible for re-invoking with updated `idling_history` rows |
 | 6 | **Cold-start problem** | Vehicles with fewer than 5 valid idling events receive no profile and are silently skipped in Phase 2. | Fall back to a fleet-average idle profile for cold-start vehicles; flag their detections separately |
 | 7 | **Asymmetric start/continue conditions** | `start_cond` checks all four signals (RPM, load, accelerator, speed). `continue_cond` only checks accelerator and speed — RPM and engine load are not re-verified during an event. This can allow non-idle RPM/load segments to extend an event. | Evaluate tightening `continue_cond` to also verify RPM and load; measure effect on event duration and fragmentation |
 
@@ -214,7 +180,7 @@ These are known weaknesses to address before productionization.
 | Constraint | Detail |
 |------------|--------|
 | OBD vehicles only | Detection requires `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`; non-OBD vehicles are excluded |
-| Historical idling CSV required | Phase 1 depends on a manually provided `idling_history.csv`; no automated data pipeline exists |
+| `vehicle_info.csv` still required | Phase 1 API still depends on a manually provided `vehicle_info.csv` for solution type filtering; no automated pipeline for this file |
 | Batch only | No real-time detection; minimum latency is one full batch run after the detection window closes |
 | DB credentials in notebook | Credentials are hardcoded — a security risk for any production deployment |
 | No production DB write | Results are written only to local CSVs; integration into a reporting database is out of scope for this phase |
@@ -229,7 +195,7 @@ These are known weaknesses to address before productionization.
 3. **Re-profiling cadence:** Should idle profiles be rebuilt weekly, monthly, or event-triggered (e.g., after an engine replacement flag)?
 4. **Short event policy:** Should events shorter than `MIN_EVENT_DURATION_S` be excluded from reports entirely, kept with a warning flag, or reported in a separate low-confidence tier?
 5. **Labeled dataset:** What source of ground truth can be used to measure precision and recall? (Options: dashcam review, driver self-report, matched gear position data if available)
-6. **Production ingestion:** Who owns automating the `idling_history.csv` pipeline so profiles can be refreshed without manual file uploads?
+6. **`vehicle_info` pipeline:** `vehicle_info.csv` is still a manual input — should it be replaced with a DB table or API call so the Phase 1 API is fully self-contained?
 7. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
 
 ---
@@ -237,6 +203,8 @@ These are known weaknesses to address before productionization.
 ## 12. Verification Checklist
 
 - [ ] All threshold values cross-checked against `free_running_detection.ipynb` (confirmed: `MIN_OBD_ROWS=3`, `MIN_VALID_EVENTS=5`, `MAX_IDLE_RPM=1000`, `MAX_IDLE_ENGINE_LOAD=35`, `MAX_IDLE_ACC_PEDAL=2`, `MIN_EVENT_DURATION_S=10`, `MIN_SPEED_KMPH=5`, `NOISE_PATIENCE=2`, `MAX_WORKERS=8`, `SAVE_EVERY=500`)
+- [ ] Phase 1 API contract confirmed: input = `idling_history` table rows; output = `uniqueid, rpm-low, rpm-high, engineload-low, engineload-high`
+- [ ] `idling_history` table schema and host/port confirmed with data engineering
 - [ ] State machine logic (start vs. continue conditions, noise patience back-dating) reviewed against notebook code
 - [ ] NULL handling behavior for `load_ok` / `acc_ok` confirmed against notebook (`np.ones` fallback)
 - [ ] Engineering sign-off on Algorithm Refinement Areas (Section 7)
