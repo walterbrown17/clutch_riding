@@ -35,13 +35,6 @@ Free-wheeling occurs when a truck is physically moving but the engine is only id
 - Free-wheeling in neutral is **illegal for heavy commercial vehicles** in several jurisdictions, including India under CMVR rules
 - Violates fleet safety SOPs and OEM operating guidelines
 
-#### 2.4 Driver Behavior
-- Strong indicator of poor driving technique or fatigue
-- Can correlate with other risky behaviors (harsh braking, over-speeding)
-
-### Current Gap
-
-No automated detection exists. Free-wheeling events go undetected and unreported across the fleet.
 
 **Scope:** OBD-equipped vehicles only (`solution_type` filter applied).
 
