@@ -61,7 +61,7 @@ No automated detection exists. Free-wheeling events go undetected and unreported
 
 ```
 idling_history (DB)  ──┐
-vehicle_info.csv     ──┤──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
+                       |──► [ Phase 1: Idle Profiler API ] ──► { uniqueid, rpm-low, rpm-high,
 obd_data_history     ──┘                                          engineload-low, engineload-high }
 
 idle profiles (API output) ──┐
