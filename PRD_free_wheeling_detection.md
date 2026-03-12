@@ -108,24 +108,32 @@ obd_data_history               ──┘
 **Internal logic:**
 1. Fetch engine-on cycles for the detection date range from `engineoncycles` (DB)
 2. Drop cycles for vehicles not present in the provided idle profiles
-3. For each cycle, fetch OBD rows from `obd_data_history` (DB) and run the state machine (below)
-4. Tag detected event rows with a `free_running_id`
-5. Flag events shorter than `MIN_EVENT_DURATION_S` with `flag_short_event = True` (not dropped)
+3. For each vehicle, fetch **all OBD rows across all its cycles in a single query**, then slice per cycle using binary search (`searchsorted`) — avoids one DB round-trip per cycle
+4. For each cycle slice, run the state machine (below)
+5. Tag detected event rows with a `free_running_id` — only rows where `accelerator_pedal_position <= 2` are tagged (rows where accelerator exceeded the threshold are excluded from the event boundary)
+6. Flag events shorter than `MIN_EVENT_DURATION_S` with `flag_short_event = True` (not dropped)
 
 **State machine — detection conditions:**
 
-| Condition | Expression | Used in |
-|-----------|-----------|---------|
-| `rpm_ok` | `rpm` between `[idle_rpm_p25, idle_rpm_p75]` | Start only |
-| `load_ok` | `engineload` between `[idle_engineload_p25, idle_engineload_p75]` | Start only |
-| `acc_ok` | `accelerator_pedal_position ≤ idle_accelerator_p75` | Start + Continue |
-| `speed_ok` | `vehiclespeed > MIN_SPEED_KMPH (5)` | Start + Continue |
-| `start_cond` | `rpm_ok AND load_ok AND acc_ok AND speed_ok` | Event start |
-| `continue_cond` | `acc_ok AND speed_ok` | Event continuation |
+| Condition | Expression | Threshold | Used in |
+|-----------|-----------|-----------|---------|
+| `rpm_ok` | `rpm` between `[rpm-low, rpm-high]` | from Phase 1 profile | Start only |
+| `load_ok` | `engineload` between `[engineload-low, engineload-high]` | from Phase 1 profile | Start only |
+| `acc_start` | `accelerator_pedal_position == 0` | hardcoded | Start only |
+| `acc_cont` | `accelerator_pedal_position <= 2` | hardcoded | Continue only |
+| `speed_ok` | `vehiclespeed > MIN_SPEED_KMPH (5)` | hardcoded | Start + Continue |
+| `start_cond` | `rpm_ok AND load_ok AND acc_start AND speed_ok` | — | Event start |
 
-The event begins when `start_cond` is satisfied. It continues as long as `continue_cond` holds. Up to `NOISE_PATIENCE = 2` consecutive bad packets are tolerated before the event is ended. When an event closes, the end index is back-dated to the first bad packet (before the patience window).
+**State machine — event continuation and termination:**
 
-**Event termination reasons:** `speed_zero`, `accelerator`, `end_of_data`
+| Situation | Behaviour |
+|-----------|-----------|
+| `acc_cont` fails (`accelerator > 2`) | Immediate event end; the failing row is excluded from the event |
+| `speed_ok` fails | Patience counter incremented; event ends after `NOISE_PATIENCE = 2` consecutive failures; end index back-dated to first bad packet |
+| Both conditions pass | Patience counter reset to 0 |
+| End of cycle data | Event closed at last row |
+
+**Event termination reasons:** `accelerator` (immediate), `speed_zero` (after patience), `end_of_data`
 
 **Configuration parameters:**
 
@@ -133,7 +141,7 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 |-----------|-------|---------|
 | `MIN_EVENT_DURATION_S` | 10 | Events shorter than this are flagged (not dropped) |
 | `MIN_SPEED_KMPH` | 5 | Speed below which the vehicle is treated as stopped |
-| `NOISE_PATIENCE` | 2 | Consecutive bad packets tolerated before ending an event |
+| `NOISE_PATIENCE` | 2 | Consecutive speed-fail packets tolerated before ending an event (does not apply to accelerator failures) |
 
 ---
 
@@ -145,7 +153,7 @@ The event begins when `start_cond` is satisfied. It continues as long as `contin
 | `engineoncycles` | PostgreSQL table | os_db:5436 | Phase 2 |
 | `idling_history` | PostgreSQL table | TBD | Phase 1 (API input) |
 
-**Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`, `obddistance`, `fuel_consumption`
+**Key OBD columns used:** `uniqueid`, `ts`, `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_pos` (DB column name; aliased to `accelerator_pedal_position` in processing), `obddistance`, `fuel_consumption`
 
 **Key engineoncycles columns used:** `cycle_id`, `uniqueid`, `cycle_start_ts`, `cycle_end_ts`, `cycle_date`
 
@@ -166,13 +174,13 @@ These are known weaknesses to address before productionization.
 
 | # | Issue | Description | Proposed Direction |
 |---|-------|-------------|-------------------|
-| 1 | **NULL handling** | If `idle_engineload_p25/p75` or `idle_accelerator_p75` is NaN in the profile, `load_ok` and `acc_ok` default to `True` (all rows pass). This silently disables part of the detection condition. | Define an explicit NULL handling policy: either exclude the vehicle entirely, fall back to fleet-average values, or flag affected events separately |
+| 1 | **NULL handling** | If `engineload-low`/`engineload-high` is NaN in the profile, `load_ok` defaults to `True` (all rows pass this condition). This silently disables the engine load check for that vehicle. Accelerator thresholds are now hardcoded so they are no longer affected. | Define an explicit NULL handling policy for engineload: either exclude the vehicle from detection, fall back to fleet-average values, or flag affected events separately |
 | 2 | **Fixed percentile bands** | P25–P75 was chosen heuristically. For vehicles with tightly-clustered idle signals the band may be too wide, accepting non-idle states; for noisy vehicles it may be too narrow, missing real idle. | Evaluate P10–P90 and adaptive width (e.g., IQR-based); measure impact on per-vehicle false positive rate |
 | 3 | **NOISE_PATIENCE tuning** | Value of 2 is not empirically validated. Too low → events broken by single bad OBD packets; too high → non-free-wheeling intervals absorbed into events. | A/B test on a manually labeled sample; measure event fragmentation rate |
 | 4 | **MIN_EVENT_DURATION_S** | 10 s threshold was not validated against real events. Short events may be GPS/OBD noise; very long events are the highest safety risk. | Determine threshold from labeled data; consider separate reporting tiers (warn vs. critical) |
 | 5 | **Profile staleness** | Idle profiles are computed from the `idling_history` table but with no defined refresh cadence. A vehicle's idle characteristics may change (engine wear, recalibration). | Define a re-profiling schedule (weekly or monthly); the API caller is responsible for re-invoking with updated `idling_history` rows |
 | 6 | **Cold-start problem** | Vehicles with fewer than 5 valid idling events receive no profile and are silently skipped in Phase 2. | Fall back to a fleet-average idle profile for cold-start vehicles; flag their detections separately |
-| 7 | **Asymmetric start/continue conditions** | `start_cond` checks all four signals (RPM, load, accelerator, speed). `continue_cond` only checks accelerator and speed — RPM and engine load are not re-verified during an event. This can allow non-idle RPM/load segments to extend an event. | Evaluate tightening `continue_cond` to also verify RPM and load; measure effect on event duration and fragmentation |
+| 7 | **Asymmetric start/continue conditions** | `start_cond` requires `accelerator == 0`; `continue_cond` allows `accelerator <= 2`. RPM and engine load are checked only at event start — not re-verified during continuation. A rising RPM/load mid-event will not end the event. | Evaluate re-verifying RPM and load during continuation; measure impact on event duration and false positive rate |
 
 ---
 
@@ -193,8 +201,9 @@ These are known weaknesses to address before productionization.
 
 ## 9. Performance and Scalability
 
-- **Parallel fetching:** `MAX_WORKERS = 8` concurrent DB connections for OBD fetching in both phases
-- **In-memory per cycle:** Each engine-on cycle is processed independently; the full dataset is never loaded into memory at once
+- **Parallel fetching:** `MAX_WORKERS = 8` concurrent DB connections; Phase 2 parallelises at the vehicle level — one thread per vehicle
+- **Batched OBD fetch:** Phase 2 issues one DB query per vehicle covering all its cycles, then uses binary search (`searchsorted`) to slice per cycle in memory — eliminates N round-trips per vehicle
+- **In-memory per cycle:** State machine runs on each cycle slice independently; the full fleet dataset is never held in memory at once
 - **Connection pools:** tracking_db uses a `ThreadedConnectionPool`; os_db uses a single read-only connection
 
 ---
@@ -228,7 +237,7 @@ These are known weaknesses to address before productionization.
 - [ ] Phase 2 API contract confirmed: input = Phase 1 profiles + date range; output = free-wheeling event records
 - [ ] `idling_history` table schema and host/port confirmed with data engineering
 - [ ] State machine logic (start vs. continue conditions, noise patience back-dating) reviewed against notebook code
-- [ ] NULL handling behavior for `load_ok` / `acc_ok` confirmed against notebook (`np.ones` fallback)
+- [ ] NULL handling behavior for `load_ok` confirmed (`np.ones` fallback when engineload profile is NaN); accelerator thresholds are now hardcoded so no longer affected
 - [ ] Engineering sign-off on Algorithm Refinement Areas (Section 7)
 - [ ] Business / fleet operations sign-off on Success Metrics (Section 8)
 - [ ] Security review: DB credential handling before any production deployment
