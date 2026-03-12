@@ -168,65 +168,14 @@ obd_data_history               ──┘
 
 ---
 
-## 7. Algorithm Refinement Areas
 
-These are known weaknesses to address before productionization.
 
-| # | Issue | Description | Proposed Direction |
-|---|-------|-------------|-------------------|
-| 1 | **NULL handling** | If `engineload-low`/`engineload-high` is NaN in the profile, `load_ok` defaults to `True` (all rows pass this condition). This silently disables the engine load check for that vehicle. Accelerator thresholds are now hardcoded so they are no longer affected. | Define an explicit NULL handling policy for engineload: either exclude the vehicle from detection, fall back to fleet-average values, or flag affected events separately |
-| 2 | **Fixed percentile bands** | P25–P75 was chosen heuristically. For vehicles with tightly-clustered idle signals the band may be too wide, accepting non-idle states; for noisy vehicles it may be too narrow, missing real idle. | Evaluate P10–P90 and adaptive width (e.g., IQR-based); measure impact on per-vehicle false positive rate |
-| 3 | **NOISE_PATIENCE tuning** | Value of 2 is not empirically validated. Too low → events broken by single bad OBD packets; too high → non-free-wheeling intervals absorbed into events. | A/B test on a manually labeled sample; measure event fragmentation rate |
-| 4 | **MIN_EVENT_DURATION_S** | 10 s threshold was not validated against real events. Short events may be GPS/OBD noise; very long events are the highest safety risk. | Determine threshold from labeled data; consider separate reporting tiers (warn vs. critical) |
-| 5 | **Profile staleness** | Idle profiles are computed from the `idling_history` table but with no defined refresh cadence. A vehicle's idle characteristics may change (engine wear, recalibration). | Define a re-profiling schedule (weekly or monthly); the API caller is responsible for re-invoking with updated `idling_history` rows |
-| 6 | **Cold-start problem** | Vehicles with fewer than 5 valid idling events receive no profile and are silently skipped in Phase 2. | Fall back to a fleet-average idle profile for cold-start vehicles; flag their detections separately |
-| 7 | **Asymmetric start/continue conditions** | `start_cond` requires `accelerator == 0`; `continue_cond` allows `accelerator <= 2`. RPM and engine load are checked only at event start — not re-verified during continuation. A rising RPM/load mid-event will not end the event. | Evaluate re-verifying RPM and load during continuation; measure impact on event duration and false positive rate |
-
----
-
-## 8. Success Metrics
-
-| Metric | Definition | Target |
-|--------|------------|--------|
-| **Profile coverage** | % of OBD-equipped vehicles with a valid idle profile built | > 80% of active vehicles |
-| **Precision** | % of detected events confirmed as true free-wheeling on manual audit sample | TBD — requires labeled ground truth |
-| **Recall** | % of actual free-wheeling events detected | TBD — no labeled dataset exists yet |
-| **Event rate baseline** | Average detected events per vehicle per day | Establish from first production run |
-| **Brake stress proxy** | Average event duration (s) × average speed (km/h) on detected events | Establish baseline; track over time |
-| **Short-event rate** | % of events flagged as `flag_short_event = True` | Inform `MIN_EVENT_DURATION_S` tuning |
-
-**Immediate next step for recall:** Identify a labeled dataset (dashcam footage + OBD sync, or driver logs) to enable precision/recall measurement.
-
----
-
-## 9. Performance and Scalability
-
-- **Parallel fetching:** `MAX_WORKERS = 8` concurrent DB connections; Phase 2 parallelises at the vehicle level — one thread per vehicle
-- **Batched OBD fetch:** Phase 2 issues one DB query per vehicle covering all its cycles, then uses binary search (`searchsorted`) to slice per cycle in memory — eliminates N round-trips per vehicle
-- **In-memory per cycle:** State machine runs on each cycle slice independently; the full fleet dataset is never held in memory at once
-- **Connection pools:** tracking_db uses a `ThreadedConnectionPool`; os_db uses a single read-only connection
-
----
-
-## 10. Constraints and Limitations
+## 7. Constraints and Limitations
 
 | Constraint | Detail |
 |------------|--------|
 | OBD vehicles only | Detection requires `rpm`, `engineload`, `vehiclespeed`, `accelerator_pedal_position`; non-OBD vehicles are excluded |
-| Batch only | No real-time detection; minimum latency is one full batch run after the detection window closes |
-| DB credentials in API | Credentials must be managed via environment variables or a secrets manager before production deployment |
-| Idling history window | Profile quality depends on the recency and volume of idling events in the `idling_history` table; stale or sparse data reduces detection reliability |
 
----
-
-## 11. Open Questions and Decisions Needed
-
-1. **`continue_cond` scope:** Should event continuation re-verify RPM and engine load, or is checking accelerator + speed sufficient? (See Refinement Area #7)
-2. **Cold-start fallback:** What fleet-average idle values should be used for vehicles with fewer than 5 valid events? Who owns maintaining this fleet average?
-3. **Re-profiling cadence:** Should idle profiles be rebuilt weekly, monthly, or event-triggered (e.g., after an engine replacement flag)?
-4. **Short event policy:** Should events shorter than `MIN_EVENT_DURATION_S` be excluded from reports entirely, kept with a warning flag, or reported in a separate low-confidence tier?
-5. **Labeled dataset:** What source of ground truth can be used to measure precision and recall? (Options: dashcam review, driver self-report, matched gear position data if available)
-6. **Alert integration:** What is the timeline and owner for real-time alerting (out of scope for v1 but a likely follow-on requirement)?
 
 ---
 
@@ -244,4 +193,3 @@ These are known weaknesses to address before productionization.
 
 ---
 
-*This PRD was generated from `free_running_detection.ipynb` (revision as of 2026-03-12). Any notebook changes should be reflected here before productionization.*
