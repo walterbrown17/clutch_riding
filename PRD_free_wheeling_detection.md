@@ -1,11 +1,5 @@
 # PRD: Free-Wheeling Detection System
 
-**Version:** 1.0
-**Date:** 2026-03-12
-**Status:** Draft — pending stakeholder sign-off
-**Authors:** Data Science Team
-**Stakeholders:** Fleet Operations, Engineering, Compliance
-
 ---
 
 ## 1. Executive Summary
