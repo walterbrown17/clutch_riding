@@ -286,7 +286,7 @@ One object per contiguous clutch-riding or normal-riding segment detected within
 
 ## 5. Fundamental Tables
 
-These two tables form the persistent storage layer for the clutch riding pipeline. `aggregation.py` reads from them to build fleet and vehicle-level reports.
+These two tables form the persistent storage layer for the clutch riding pipeline.
 
 ---
 
