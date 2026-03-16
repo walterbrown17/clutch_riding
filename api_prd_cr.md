@@ -15,21 +15,7 @@ The API produces two levels of output:
 
 ---
 
-## 2. Module Architecture
-
-```
-clutch_riding/
-├── config.py        — Detection thresholds and duration constants
-├── logic.py         — Core pipeline: DQM → detection → merging → metrics
-├── service.py       — [stub] Orchestrates DB fetch + logic pipeline per cycle
-├── resolver.py      — [stub] GraphQL resolver binding
-├── aggregation.py   — [stub] Fleet/vehicle-level rollup from fundamental table
-└── schema.graphql   — [stub] GraphQL type and query definitions
-```
-
----
-
-## 3. Processing Pipeline
+## 2. Processing Pipeline
 
 ```
 Raw OBD packets (from DB)
@@ -123,7 +109,7 @@ Distance-based, not fuel-based.
 
 ---
 
-## 4. API Usage
+## 3. API Usage
 
 ### GraphQL Endpoint
 
@@ -203,7 +189,7 @@ query ClutchRidingAnalysis(
 
 ---
 
-## 5. Output Structure
+## 4. Output Structure
 
 The response is a **list of engine cycles**. Each cycle object contains three nested sections: `dqm`, `metrics`, and `events`. This mirrors the BMS API pattern where each engine cycle carries its own aggregated summary alongside its constituent detail records.
 
@@ -219,7 +205,7 @@ clutchRidingAnalysis
     └── events[]                  ← individual clutch/normal segments within this cycle
 ```
 
-### 5.1 Cycle-Level Fields
+### 4.1 Cycle-Level Fields
 
 | Field | Type | Description |
 |---|---|---|
@@ -230,7 +216,7 @@ clutchRidingAnalysis
 
 ---
 
-### 5.2 DQM Flags (`dqm`)
+### 4.2 DQM Flags (`dqm`)
 
 Data quality metadata produced during `clean_and_flag_data()`. All flags are cycle-scoped — they reflect the quality of the raw OBD stream for that entire cycle and are propagated onto every event inside it.
 
@@ -245,7 +231,7 @@ Data quality metadata produced during `clean_and_flag_data()`. All flags are cyc
 
 ---
 
-### 5.3 Cycle Metrics (`metrics`)
+### 4.3 Cycle Metrics (`metrics`)
 
 Aggregated KPIs computed by `compute_metrics()` called on this cycle's merged event list. Three segments are reported: overall, clutch riding only, and normal riding only.
 
@@ -266,7 +252,7 @@ Aggregated KPIs computed by `compute_metrics()` called on this cycle's merged ev
 
 ---
 
-### 5.4 Events List (`events[]`)
+### 4.4 Events List (`events[]`)
 
 One object per contiguous clutch-riding or normal-riding segment detected within the cycle, after noise merging. Ordered by `event_start_epoch`.
 
@@ -298,7 +284,7 @@ One object per contiguous clutch-riding or normal-riding segment detected within
 
 ---
 
-## 6. Fundamental Tables
+## 5. Fundamental Tables
 
 These two tables form the persistent storage layer for the clutch riding pipeline. `aggregation.py` reads from them to build fleet and vehicle-level reports.
 
