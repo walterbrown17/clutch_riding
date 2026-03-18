@@ -11,7 +11,7 @@ The API produces two levels of output:
 | Level | Description |
 |---|---|
 | **Event level** | Each contiguous segment of clutch-riding or normal-riding within a cycle |
-| **Metrics level** | Aggregated KPIs — distance, fuel, mileage, and clutch distance% per vehicle/fleet |
+| **Metrics level** | Aggregated KPIs — distance, fuel, mileage, and clutch-riding% per vehicle/fleet |
 
 ---
 
