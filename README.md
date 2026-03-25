@@ -1,642 +1,385 @@
-# Clutch Riding Analysis System
+# Tech PRD — Clutch Riding API
 
-## Overview
 
-This project implements a comprehensive analysis system to detect and quantify clutch riding behavior in commercial vehicles. Clutch riding is a harmful driving practice where drivers keep the clutch pressed while the vehicle is moving at speed with the accelerator engaged, leading to excessive wear, fuel wastage, and increased operational costs.
+## 1. Purpose
 
-## Table of Contents
+Detects and quantifies *clutch riding* behaviour from raw OBD telemetry per engine cycle.
+Clutch riding is defined as: **clutch pedal held pressed while the vehicle is moving above 20 km/h with the accelerator also engaged** — a driving habit that causes premature clutch wear and degrades fuel efficiency.
 
-- [What is Clutch Riding?](#what-is-clutch-riding)
-- [Detection Criteria](#detection-criteria)
-- [System Architecture](#system-architecture)
-- [Data Flow](#data-flow)
-- [Processing Logic](#processing-logic)
-- [Output Structure](#output-structure)
-- [Notebooks](#notebooks)
-- [Data Quality Handling](#data-quality-handling)
-- [Usage](#usage)
+The API produces two levels of output:
+
+| Level | Description |
+|---|---|
+| **Event level** | Each contiguous segment of clutch-riding or normal-riding within a cycle |
+| **Metrics level** | Aggregated KPIs — distance, fuel, mileage, and clutch-riding% per vehicle/fleet |
 
 ---
 
-## What is Clutch Riding?
+## 2. Processing Pipeline
 
-**Clutch riding** occurs when a driver keeps the clutch pedal pressed while:
-- The vehicle is moving (speed > 20 km/h)
-- The accelerator pedal is pressed (> 2%)
-- The engine is running
+```
+Raw OBD packets (from DB)
+        │
+        ▼
+┌─────────────────────────┐
+│  1. clean_and_flag_data  │  ← Sensor checks, DQM flags, column normalization
+└─────────────────────────┘
+        │
+        ▼
+┌─────────────────────────┐
+│  2. detect_clutch_events │  ← Packet-level classification → event grouping
+└─────────────────────────┘
+        │
+        ▼
+┌─────────────────────────┐
+│  3. merge_events         │  ← Noise reduction (deduplication of boundary artefacts)
+└─────────────────────────┘
+        │
+        ▼
+┌─────────────────────────┐
+│  4. compute_metrics      │  ← Aggregate KPIs (distance / fuel / mileage / %)
+└─────────────────────────┘
+```
 
-This practice causes:
-- **Premature clutch wear** - Significantly reduces clutch life
-- **Fuel wastage** - Poor combustion efficiency
-- **Increased maintenance costs** - More frequent clutch replacements
-- **Safety concerns** - Reduced vehicle control
+### Step 1 — DQM Cleaning (`clean_and_flag_data`)
 
----
+Produces quality flags for the cycle and normalises numeric columns.
 
-## Detection Criteria
+- Cumulative sensors (`obddistance`, `fuel_consumption`) are **forward-filled** to handle mid-cycle dropouts.
+- Missing columns are injected with `0` to prevent downstream KeyErrors.
+- Speeds are coerced; impossibly high values (`>= 250 km/h`) are flagged.
+- Time-gap continuity is checked; gaps `> 60 s` are flagged.
 
-An event is classified as **clutch riding** when ALL of the following conditions are met simultaneously:
+### Step 2 — Event Detection (`detect_clutch_events`)
 
+Operates on packet-level diffs:
+
+```
+event_duration          = diff(ts)
+event_distance_m        = diff(obddistance)
+event_fuel_liters       = diff(fuel_consumption)
+event_fuel_from_rate    = fuel_rate (L/h) × 5s / 3600
+```
+
+Haversine GPS distance is computed alongside OBD odometer as a cross-check.
+
+**Clutch riding condition per packet:**
 ```
 clutch_switch_status == 'Pressed'
 AND vehiclespeed > 20 km/h
-AND accelerator_pedal_pos > 2%
+AND accelerator_pedal_pos > 2
 ```
 
-### Additional Classification
+Consecutive packets with the same state are grouped into a single event.
+Events shorter than 2 seconds are discarded as noise.
 
-- **Significant Consecutive Pattern**: Events with ≥5 consecutive packets (indicating sustained clutch riding)
-- **Duration Categories**:
-  - Short: < 10 seconds
-  - Medium: 10-30 seconds
-  - Long: 30-60 seconds
-  - Very Long: > 60 seconds
+### Step 3 — Event Merging (`merge_events`)
+
+Iteratively resolves two boundary noise patterns:
+
+| Pattern | Action |
+|---|---|
+| `normal(≥30s)` → `clutch(≤10s)` → `normal(≥30s)` | Merge all three → `normal_riding` |
+| `clutch` → `normal(≤10s)` → `clutch` | Merge all three → `clutch_riding` |
+
+Loop continues until no further merges are possible (handles cascades).
+
+**Merge arithmetic:**
+- `duration`, `distance_km`, `fuel_consumed_liters` → simple sum
+- `avg_speed_kmh`, `avg_rpm` → duration-weighted average
+- `severity` → re-derived from merged total duration
+- `mileage_kmpl` → recomputed from merged totals
+
+### Step 4 — Metrics Computation (`compute_metrics`)
+
+Produces three segments: `overall`, `clutch_riding`, `normal_riding`.
+
+**Mileage rule:**
+```
+mileage_kmpl = sum(distance_km) / sum(fuel_consumed_liters)
+               using ONLY events where severity ∈ {Medium, Long, Very Long}
+               (Short events excluded — too brief for accurate fuel reading)
+```
+
+**Clutch riding %:**
+```
+clutch_riding_pct = (clutch_distance_km / overall_distance_km) × 100
+```
+Distance-based, not fuel-based.
 
 ---
 
-## System Architecture
+## 3. API Usage
+
+### GraphQL Endpoint
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Data Sources                                  │
-│  ┌──────────────────────┐    ┌──────────────────────┐          │
-│  │  Engine Cycles DB    │    │  OBD Data History    │          │
-│  │  (cycle metadata)    │    │  (telemetry packets) │          │
-│  └──────────────────────┘    └──────────────────────┘          │
-└─────────────────────────────────────────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Parallel Data Fetching (20 Workers)                 │
-│  - Fetch OBD data for each engine cycle                         │
-│  - ThreadPoolExecutor for concurrent processing                 │
-└─────────────────────────────────────────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                Event Detection & Processing                      │
-│  - Apply detection criteria                                     │
-│  - Group consecutive clutch riding packets                      │
-│  - Calculate event metrics (duration, distance, fuel)          │
-│  - Flag data quality issues                                     │
-└─────────────────────────────────────────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Multi-Level Aggregation                            │
-│  ┌───────────────┐  ┌───────────────┐  ┌──────────────────┐   │
-│  │ Event-Level   │  │  Daily Stats  │  │ Vehicle Stats    │   │
-│  │ (individual)  │  │  (aggregated) │  │ (monthly total)  │   │
-│  └───────────────┘  └───────────────┘  └──────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Visualization & Reporting                       │
-│  - Time-series analysis                                         │
-│  - Vehicle performance rankings                                 │
-│  - Executive dashboards                                         │
-└─────────────────────────────────────────────────────────────────┘
+POST /graphql
 ```
 
----
+### Intended Query (schema to be defined in `schema.graphql`)
 
-## Data Flow
+```graphql
+query ClutchRidingAnalysis(
+  $unique_id: String!
+  $fromTime: Float!
+  $toTime: Float!
+) {
+  clutchRidingAnalysis(
+    unique_id: $unique_id
+    fromTime: $fromTime
+    toTime: $toTime
+  ) {
+    cycles {
+      cycle_id
+      cycle_start_ts
+      cycle_end_ts
+      cycle_duration_sec
 
-### 1. Input Data
+      start_lat
+      start_lng
+      end_lat
+      end_lng
 
-#### Engine Cycles Data (`engineoncycles_*.csv`)
-- **Purpose**: Defines the analysis scope
-- **Columns**:
-  - `cycle_id`: Unique identifier for each engine cycle
-  - `uniqueid`: Vehicle identifier
-  - `cycle_start_ts`: Cycle start timestamp (Unix)
-  - `cycle_end_ts`: Cycle end timestamp (Unix)
-  - `cycle_date`: Date in YYYY-MM-DD format
-  - `cycle_duration_sec`: Cycle duration in seconds
+      dqm {
+        fuel_missing
+        dist_missing
+        rpm_missing
+        clutch_missing
+        large_time_gap_exists
+        impossible_speed_detected
+      }
 
-#### OBD Data (from PostgreSQL database)
-- **Table**: `obd_data_history`
-- **Key Columns**:
-  - `uniqueid`: Vehicle identifier
-  - `ts`: Timestamp (Unix)
-  - `vehiclespeed`: Speed in km/h
-  - `rpm`: Engine RPM
-  - `clutch_switch_status`: 'Pressed' or 'Released'
-  - `accelerator_pedal_pos`: Accelerator position (0-100%)
-  - `fuel_consumption`: Cumulative fuel consumption (liters)
-  - `obddistance`: Cumulative distance (meters)
+      metrics {
+        overall_distance_km
+        overall_consumption_liters
+        overall_mileage_kmpl
+        clutch_riding_distance_km
+        clutch_riding_consumption_liters
+        clutch_riding_mileage_kmpl
+        normal_riding_distance_km
+        normal_riding_consumption_liters
+        normal_riding_mileage_kmpl
+        clutch_riding_pct
+      }
 
-### 2. Processing Pipeline
-
-#### Step 1: Data Fetching
-```python
-def fetch_obd_data_for_cycle(cycle_row, engine):
-    """Fetch all OBD packets for a given cycle time window"""
-    - Query OBD data between cycle_start_ts and cycle_end_ts
-    - Return complete telemetry data for the cycle
-```
-
-#### Step 2: Event Detection
-```python
-def process_cycle_data(obd_df, cycle_id, cycle_date):
-    """Detect clutch riding events within a cycle"""
-
-    # 1. Data Cleaning
-    - Convert columns to numeric
-    - Handle NULL values with forward fill
-    - Flag cycles with missing fuel data
-
-    # 2. Calculate Event Metrics
-    - event_distance = diff(obddistance)
-    - event_fuel = diff(fuel_consumption)
-    - event_duration = diff(ts)
-
-    # 3. Apply Detection Logic
-    is_clutch_riding = (
-        (clutch_status == 'Pressed') &
-        (speed > 20) &
-        (accelerator > 2)
-    )
-
-    # 4. Group Consecutive Events
-    - Identify continuous clutch riding periods
-    - Aggregate metrics for each event
-
-    # 5. Validate & Filter
-    - Remove unrealistic events (distance > 20km, fuel > 5L, duration > 30min)
-    - Skip events with < 2 packets
-
-    return {
-        'events': DataFrame of detected events,
-        'processed_data': All packets with flags,
-        'data_quality': Quality metrics
+      events {
+        event_type
+        event_start_ts
+        event_end_ts
+        duration_sec
+        distance_km
+        avg_speed_kmh
+        avg_rpm
+        severity
+        fuel_consumed_liters
+        mileage_kmpl
+        start_lat
+        start_lng
+        end_lat
+        end_lng
+        dqm_fuel_error
+        dqm_dist_error
+        dqm_speed_error
+        dqm_gap_error
+      }
     }
+  }
+}
 ```
 
-#### Step 3: Aggregation
-- **Event-Level**: Individual clutch riding instances
-- **Cycle-Level**: Summary per engine cycle
-- **Daily-Level**: Aggregated daily metrics
-- **Vehicle-Level**: Monthly performance per vehicle
-- **Fleet-Level**: Overall monthly statistics
+### Input Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `unique_id` | `String` | Yes | Vehicle device identifier (OBD unit ID) |
+| `fromTime` | `Float` | Yes | Window start — UNIX epoch seconds |
+| `toTime` | `Float` | Yes | Window end — UNIX epoch seconds |
 
 ---
 
-## Output Structure
+## 4. Output Structure
 
-### 1. Event-Level Data (`clutch_riding_events_*.csv`)
+The response is a **list of engine cycles**. Each cycle object contains three nested sections: `dqm`, `metrics`, and `events`. This mirrors the BMS API pattern where each engine cycle carries its own aggregated summary alongside its constituent detail records.
 
-Each row represents a single clutch riding event.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `cycle_id` | String | Engine cycle identifier |
-| `cycle_date` | Date | Date of the cycle (YYYY-MM-DD) |
-| `uniqueid` | String | Vehicle identifier |
-| `event_start_ts` | Integer | Event start timestamp (Unix) |
-| `event_end_ts` | Integer | Event end timestamp (Unix) |
-| `event_start_datetime` | Datetime | Human-readable start time |
-| `event_end_datetime` | Datetime | Human-readable end time |
-| `event_duration_sec` | Float | Duration in seconds |
-| `event_distance_m` | Float | Distance traveled (meters) |
-| `event_distance_km` | Float | Distance traveled (kilometers) |
-| `event_fuel_liters` | Float | Fuel consumed (liters) |
-| `event_mileage_kmpl` | Float | Mileage during event (km/L) |
-| `avg_speed_kmh` | Float | Average speed during event |
-| `avg_rpm` | Integer | Average engine RPM during event |
-| `consecutive_packet_count` | Integer | Number of consecutive packets |
-| `consecutive_duration_category` | String | Duration classification |
-| `significant_consecutive_flag` | Boolean | True if ≥5 consecutive packets |
-| `fuel_null_flag` | Boolean | True if fuel data was NULL |
-| `event_index` | Integer | Event number within the cycle |
-
-**Key Metrics**:
-- **Typical Dataset Size**: 2.5M+ events for monthly data
-- **File Format**: CSV (Excel not supported due to row limits)
-
-### 2. Daily Statistics (`daily_statistics_*.csv`)
-
-Aggregated metrics per day.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `date` | Date | Analysis date |
-| `total_cycles` | Integer | Total engine cycles on this day |
-| `cycles_with_clutch_riding` | Integer | Cycles that had clutch riding events |
-| `vehicles_with_clutch_riding` | Integer | Unique vehicles with clutch riding |
-| `total_events` | Integer | Total clutch riding events detected |
-| `total_duration_sec` | Float | Total duration (seconds) |
-| `total_duration_hours` | Float | Total duration (hours) |
-| `total_distance_km` | Float | Total distance during clutch riding |
-| `total_fuel_liters` | Float | Total fuel wasted |
-| `avg_speed_kmh` | Float | Average speed across all events |
-| `avg_rpm` | Integer | Average RPM across all events |
-| `significant_consecutive_events` | Integer | Events with ≥5 consecutive packets |
-| `clutch_riding_cycle_pct` | Float | % of cycles with clutch riding |
-
-**Use Cases**:
-- Identify problematic days
-- Track daily trends
-- Week-over-week comparisons
-- Day-of-week patterns
-
-### 3. Vehicle Statistics (`vehicle_statistics_*.csv`)
-
-Monthly performance summary per vehicle.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `uniqueid` | String | Vehicle identifier |
-| `total_cycles` | Integer | Total engine cycles for this vehicle |
-| `cycles_with_clutch_riding` | Integer | Cycles with clutch riding events |
-| `days_active` | Integer | Number of days vehicle was active |
-| `total_events` | Integer | Total clutch riding events |
-| `total_duration_sec` | Float | Total clutch riding duration (seconds) |
-| `total_duration_hours` | Float | Total clutch riding duration (hours) |
-| `total_distance_km` | Float | Total distance during clutch riding |
-| `total_fuel_liters` | Float | Total fuel wasted |
-| `avg_speed_kmh` | Float | Average speed during clutch riding |
-| `avg_rpm` | Integer | Average RPM during clutch riding |
-| `significant_consecutive_events` | Integer | Events with sustained clutch riding |
-| `clutch_riding_cycle_pct` | Float | % of vehicle's cycles with clutch riding |
-| `avg_events_per_day` | Float | Average events per active day |
-
-**Sorting**: Ordered by `total_events` descending (worst offenders first)
-
-**Use Cases**:
-- Identify vehicles requiring driver training
-- Rank fleet performance
-- Target maintenance interventions
-
-### 4. Data Quality Report (`data_quality_issues_*.xlsx`)
-
-Flags cycles with data quality concerns.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `cycle_id` | String | Cycle identifier |
-| `cycle_date` | Date | Cycle date |
-| `total_packets` | Integer | Total OBD packets in cycle |
-| `fuel_all_null` | Boolean | All fuel data is NULL |
-| `distance_all_null` | Boolean | All distance data is NULL |
-| `speed_all_null` | Boolean | All speed data is NULL |
-| `rpm_all_null` | Boolean | All RPM data is NULL |
-| `clutch_all_null` | Boolean | All clutch status is NULL |
-| `accelerator_all_null` | Boolean | All accelerator data is NULL |
-| `has_critical_issues` | Boolean | Critical data missing (distance) |
-
----
-
-## Notebooks
-
-### 1. `clutch_riding_engineoncycle.ipynb`
-**Purpose**: Original single-day analysis template
-
-**Functionality**:
-- Process single day of engine cycles
-- Detect clutch riding events
-- Generate event and cycle-level statistics
-- Basic visualization
-
-**Use Case**: Ad-hoc daily analysis
-
----
-
-### 2. `clutch_riding_monthly_analysis.ipynb`
-**Purpose**: Large-scale monthly processing
-
-**Key Features**:
-- Parallel processing with 20 workers
-- Handles 180K+ cycles efficiently
-- Multi-level aggregation (event, daily, vehicle, monthly)
-- Automatic data quality flagging
-- Smart file export (CSV for large datasets, Excel when possible)
-
-**Configuration**:
-```python
-NUM_WORKERS = 20           # Parallel workers
-BATCH_SIZE = 1000          # Memory management
-OUTPUT_DIR = './outputs_monthly'
+```
+clutchRidingAnalysis
+└── cycles[]                      ← one object per engine ON cycle
+    ├── cycle_id
+    ├── cycle_start_ts
+    ├── cycle_end_ts
+    ├── cycle_duration_sec
+    ├── start_lat / start_lng / end_lat / end_lng
+    ├── dqm { ... }               ← data quality flags for this cycle
+    ├── metrics { ... }           ← aggregated KPIs for this cycle
+    └── events[]                  ← individual clutch/normal segments within this cycle
 ```
 
-**Execution Time**: Several hours for 180K+ cycles
+### 4.1 Cycle-Level Fields
 
-**Output**:
-- `clutch_riding_events_monthly_*.csv` (2.5M+ rows)
-- `daily_statistics_monthly_*.csv` (~30 rows)
-- `vehicle_statistics_monthly_*.csv` (~1500 rows)
-- `data_quality_issues_monthly_*.xlsx`
-
----
-
-### 3. `clutch_riding_visualization_no_seaborn.ipynb`
-**Purpose**: Single-day visualization dashboard
-
-**Input Files**:
-- `clutch_riding_events_YYYY-MM-DD.csv`
-- `cycle_summary_YYYY-MM-DD.csv`
-
-**Visualizations** (15+ charts):
-
-1. **Event Duration Analysis**
-   - Histogram of event durations
-   - Duration category pie chart
-   - Box plot by category
-
-2. **Distance Analysis**
-   - Event distance distribution
-   - Cumulative distance over time
-
-3. **Fuel Analysis**
-   - Fuel consumption per event
-   - Mileage during clutch riding
-   - Fuel waste by duration category
-
-4. **Speed & RPM Analysis**
-   - Speed distribution during clutch riding
-   - RPM patterns
-   - Speed vs. RPM correlation
-
-5. **Consecutive Pattern Analysis**
-   - Packet count distribution
-   - Significant vs. normal events
-
-6. **Cycle-Level Comparisons**
-   - Clutch riding cycles vs. normal cycles
-   - Comparative statistics
-
-7. **Correlation Heatmap**
-   - Relationships between metrics
-
-8. **Executive Summary Dashboard**
-   - Multi-panel overview
-   - Key metrics and trends
-
-**Export**: `clutch_riding_summary_dashboard_*.xlsx`
-
-**Technology**: Pure matplotlib (no seaborn dependency)
+| Field | Type | Description |
+|---|---|---|
+| `cycle_id` | String | Unique identifier for the engine ON cycle |
+| `cycle_start_ts` | Int | UNIX timestamp (seconds) — engine ON |
+| `cycle_end_ts` | Int | UNIX timestamp (seconds) — engine OFF |
+| `cycle_duration_sec` | Int | Total duration of the cycle in seconds |
+| `start_lat` | Float | GPS latitude at engine ON (first OBD packet) |
+| `start_lng` | Float | GPS longitude at engine ON (first OBD packet) |
+| `end_lat` | Float | GPS latitude at engine OFF (last OBD packet) |
+| `end_lng` | Float | GPS longitude at engine OFF (last OBD packet) |
 
 ---
 
-### 4. `clutch_riding_monthly_visualization.ipynb`
-**Purpose**: Monthly trend analysis and vehicle rankings
+### 4.2 DQM Flags (`dqm`)
 
-**Auto-Detection**: Automatically finds latest files in `./outputs_monthly/`
+Data quality metadata produced during `clean_and_flag_data()`. All flags are cycle-scoped — they reflect the quality of the raw OBD stream for that entire cycle and are propagated onto every event inside it.
 
-**Visualizations**:
-
-1. **Time-Series Analysis**
-   - Daily event trends (line charts)
-   - Daily duration and distance trends
-   - Daily fuel waste trends
-
-2. **Week-over-Week Analysis**
-   - Weekly aggregations
-   - Week comparison charts
-
-3. **Day-of-Week Patterns**
-   - Average events by weekday
-   - Operational patterns
-
-4. **Monthly Aggregations**
-   - Overall monthly statistics
-   - Month-to-month comparisons
-
-5. **Vehicle Performance Rankings**
-   - Top 20 offenders (by events)
-   - Top 20 offenders (by fuel waste)
-   - Top 20 offenders (by duration)
-
-6. **Projected Annual Impact**
-   - Extrapolated yearly metrics
-   - Cost impact estimates (₹100/liter assumed)
-
-**Export**: `clutch_riding_monthly_dashboard.xlsx`
+| Field | Type | Description |
+|---|---|---|
+| `fuel_missing` | Boolean | `fuel_consumption` column absent or entirely NaN |
+| `dist_missing` | Boolean | `obddistance` column absent or entirely NaN |
+| `rpm_missing` | Boolean | `rpm` absent, all NaN, or all zero |
+| `clutch_missing` | Boolean | `clutch_switch_status` absent or entirely NaN — clutch detection not possible for this cycle |
+| `large_time_gap_exists` | Boolean | Any time gap `> 60 s` between consecutive packets |
+| `impossible_speed_detected` | Boolean | Any packet with `vehiclespeed ≥ 250 km/h` |
 
 ---
 
-## Data Quality Handling
+### 4.3 Cycle Metrics (`metrics`)
 
-### NULL Fuel Data Strategy
+Aggregated KPIs computed by `compute_metrics()` called on this cycle's merged event list. Three segments are reported: overall, clutch riding only, and normal riding only.
 
-**Problem**: Some cycles have NULL fuel consumption data
+| Field | Type | Description |
+|---|---|---|
+| `overall_distance_km` | Float | Total distance across all events in this cycle (km) |
+| `overall_consumption_liters` | Float | Total fuel consumed across all events in this cycle (L) |
+| `overall_mileage_kmpl` | Float | Cycle mileage: sum_dist / sum_cons using Medium+ events only (km/L) |
+| `clutch_riding_distance_km` | Float | Distance covered in clutch_riding events (km) |
+| `clutch_riding_consumption_liters` | Float | Fuel consumed in clutch_riding events (L) |
+| `clutch_riding_mileage_kmpl` | Float | Mileage for the clutch_riding segment only (km/L) |
+| `normal_riding_distance_km` | Float | Distance covered in normal_riding events (km) |
+| `normal_riding_consumption_liters` | Float | Fuel consumed in normal_riding events (L) |
+| `normal_riding_mileage_kmpl` | Float | Mileage for the normal_riding segment only (km/L) |
+| `clutch_riding_pct` | Float | `(clutch_distance / overall_distance) × 100` — primary KPI for this cycle |
 
-**Solution**: Flag but don't exclude
-```python
-# Flag NULL fuel cycles
-data_quality['fuel_all_null'] = df['fuel_consumption'].isna().all()
-
-# Store flag in event data
-event['fuel_null_flag'] = data_quality['fuel_all_null']
-
-# Calculate mileage only for valid fuel data
-if not fuel_null_flag and event_fuel > 0:
-    event_mileage = distance / fuel
-else:
-    event_mileage = 0
-```
-
-**Benefits**:
-- Retain all clutch riding events
-- Track data quality per event
-- Filter by fuel_null_flag when analyzing fuel metrics
-- Transparent reporting
-
-### Data Validation
-
-**Distance Validation**:
-```python
-# Remove negative distances (sensor resets)
-df.loc[df['event_distance'] < 0, 'event_distance'] = 0
-
-# Cap unrealistic distances (> 5km per packet)
-df.loc[df['event_distance'] > 5000, 'event_distance'] = 0
-```
-
-**Fuel Validation**:
-```python
-# Remove negative fuel (sensor issues)
-df.loc[df['event_fuel'] < 0, 'event_fuel'] = 0
-
-# Cap unrealistic fuel (> 2L per packet)
-df.loc[df['event_fuel'] > 2, 'event_fuel'] = 0
-```
-
-**Event-Level Filtering**:
-```python
-# Skip unrealistic events
-if event_distance_m > 20000:     # > 20km
-    continue
-if event_fuel_liters > 5:         # > 5L
-    continue
-if event_duration_sec > 1800:     # > 30 minutes
-    continue
-```
+> **Mileage rule:** `sum(distance_km) / sum(fuel_consumed_liters)` using only events where `severity ∈ {Medium, Long, Very Long}`. Short events (`< 10 s`) are excluded from both numerator and denominator.
 
 ---
 
-## Usage
+### 4.4 Events List (`events[]`)
 
-### Single-Day Analysis
+One object per contiguous clutch-riding or normal-riding segment detected within the cycle, after noise merging. Ordered by `event_start_epoch`.
 
-1. Prepare your daily cycle data
-2. Open `clutch_riding_engineoncycle.ipynb`
-3. Update the cycle file path
-4. Run all cells
-5. Review event-level and cycle-level outputs
+| Field | Type | Description |
+|---|---|---|
+| `event_type` | String | `clutch_riding` or `normal_riding` |
+| `event_start_ts` | Int | UNIX timestamp (seconds) — start of the segment |
+| `event_end_ts` | Int | UNIX timestamp (seconds) — end of the segment |
+| `duration_sec` | Float | Duration of the segment in seconds |
+| `distance_km` | Float | Distance covered during the segment (km, from OBD odometer) |
+| `avg_speed_kmh` | Float | Average vehicle speed during the segment (km/h) |
+| `avg_rpm` | Float | Average engine RPM during the segment |
+| `severity` | String | Duration tier — see table below |
+| `fuel_consumed_liters` | Float | Fuel consumed during the segment (litres) |
+| `mileage_kmpl` | Float | Segment mileage (km/L); `0.0` when fuel data unavailable |
+| `start_lat` | Float | GPS latitude at the start of this segment |
+| `start_lng` | Float | GPS longitude at the start of this segment |
+| `end_lat` | Float | GPS latitude at the end of this segment |
+| `end_lng` | Float | GPS longitude at the end of this segment |
+| `dqm_fuel_error` | Boolean | Propagated from cycle DQM — fuel sensor issue |
+| `dqm_dist_error` | Boolean | Propagated from cycle DQM — odometer issue |
+| `dqm_speed_error` | Boolean | Propagated from cycle DQM — impossible speed detected |
+| `dqm_gap_error` | Boolean | Propagated from cycle DQM — large time gap present |
 
-### Monthly Analysis
+#### Severity Categories
 
-1. Prepare monthly cycle file: `engineoncycles_*.csv`
-2. Open `clutch_riding_monthly_analysis.ipynb`
-3. Configure:
-   ```python
-   ENGINE_CYCLES_FILE = 'engineoncycles_YYYYMMDDHHMMSS.csv'
-   NUM_WORKERS = 20  # Adjust based on server capacity
-   ```
-4. Run all cells (will take several hours)
-5. Output saved to `./outputs_monthly/`
-
-### Monthly Visualization
-
-1. Ensure monthly analysis completed successfully
-2. Open `clutch_riding_monthly_visualization.ipynb`
-3. Run all cells (auto-detects latest files)
-4. Review time-series trends and vehicle rankings
-5. Export: `clutch_riding_monthly_dashboard.xlsx`
-
-### Single-Day Visualization
-
-1. Prepare event and cycle summary CSVs
-2. Open `clutch_riding_visualization_no_seaborn.ipynb`
-3. Update file paths:
-   ```python
-   events_file = 'clutch_riding_events_2025-12-25.csv'
-   summary_file = 'cycle_summary_2025-12-25.csv'
-   ```
-4. Run all cells
-5. Export: `clutch_riding_summary_dashboard_*.xlsx`
+| Severity | Duration Range | Included in Mileage Calc? |
+|---|---|---|
+| `Short` | `< 10 s` | No |
+| `Medium` | `10 s – 30 s` | Yes |
+| `Long` | `30 s – 60 s` | Yes |
+| `Very Long` | `≥ 60 s` | Yes |
 
 ---
 
-## Key Insights & Metrics
+## 5. Fundamental Tables
 
-### Typical Monthly Results (Sample)
-
-**Fleet Overview**:
-- Total Vehicles: ~1,500
-- Vehicles with Clutch Riding: ~1,200 (80%)
-- Total Engine Cycles: ~187,000
-- Cycles with Clutch Riding: ~60,000 (32%)
-
-**Impact**:
-- Total Events Detected: ~2.5 million
-- Total Duration: ~8,000 hours
-- Total Distance: ~120,000 km
-- Total Fuel Wasted: ~5,000 liters
-- Estimated Cost: ₹500,000 (@₹100/L)
-
-**Daily Averages**:
-- Events per Day: ~80,000
-- Duration per Day: ~250 hours
-- Fuel Wasted per Day: ~160 liters
-
-**Vehicle Performance**:
-- Avg Events per Vehicle: ~2,000
-- Worst Offender: ~15,000 events/month
-- Vehicles with >100 events: ~800
+These two tables form the persistent storage layer for the clutch riding pipeline.
 
 ---
 
-## Technical Requirements
+### Table 1 — `clutch_riding_cycles`
 
-### Dependencies
+One row per engine ON cycle. Stores the cycle envelope and all aggregated KPIs produced by `compute_metrics()` for that cycle.
 
-```python
-pandas>=1.5.0
-numpy>=1.23.0
-matplotlib>=3.6.0
-sqlalchemy>=2.0.0
-psycopg2>=2.9.0
-tqdm>=4.64.0
-openpyxl>=3.0.0  # For Excel export
-```
+**Primary key:** `cycle_id` — surrogate key for this table, generated by the tech team.
 
-### Database
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `cycle_id` | VARCHAR | PK, NOT NULL | Surrogate primary key for this table — generation strategy left to the tech team |
+| `unique_id` | VARCHAR | NOT NULL | Vehicle device identifier (OBD unit ID) |
+| `cycle_start_ts` | BIGINT | NOT NULL | Cycle start — UNIX epoch seconds (engine ON) |
+| `cycle_end_ts` | BIGINT | NOT NULL | Cycle end — UNIX epoch seconds (engine OFF) |
+| `cycle_date` | DATE | NOT NULL | Calendar date of `cycle_start_ts` (UTC) — enables efficient day-level aggregation without epoch arithmetic |
+| `cycle_duration_sec` | INT | NOT NULL | `cycle_end_ts - cycle_start_ts` |
+| `start_lat` | FLOAT | NOT NULL | GPS latitude at engine ON — from first OBD packet in cycle |
+| `start_lng` | FLOAT | NOT NULL | GPS longitude at engine ON — from first OBD packet in cycle |
+| `end_lat` | FLOAT | NOT NULL | GPS latitude at engine OFF — from last OBD packet in cycle |
+| `end_lng` | FLOAT | NOT NULL | GPS longitude at engine OFF — from last OBD packet in cycle |
+| `overall_distance_km` | FLOAT | NOT NULL | Total distance across all events in this cycle (km) |
+| `overall_consumption_liters` | FLOAT | NOT NULL | Total fuel consumed across all events in this cycle (L) |
+| `overall_mileage_kmpl` | FLOAT | NOT NULL | Cycle mileage — `sum_dist / sum_cons` using Medium+ events only (km/L) |
+| `clutch_riding_distance_km` | FLOAT | NOT NULL | Distance covered in `clutch_riding` events (km) |
+| `clutch_riding_consumption_liters` | FLOAT | NOT NULL | Fuel consumed in `clutch_riding` events (L) |
+| `clutch_riding_mileage_kmpl` | FLOAT | NOT NULL | Mileage for the clutch_riding segment only (km/L) |
+| `normal_riding_distance_km` | FLOAT | NOT NULL | Distance covered in `normal_riding` events (km) |
+| `normal_riding_consumption_liters` | FLOAT | NOT NULL | Fuel consumed in `normal_riding` events (L) |
+| `normal_riding_mileage_kmpl` | FLOAT | NOT NULL | Mileage for the normal_riding segment only (km/L) |
+| `clutch_riding_pct` | FLOAT | NOT NULL | `(clutch_distance / overall_distance) × 100` — primary KPI |
+| `created_at` | TIMESTAMP WITH TIME ZONE | NOT NULL, DEFAULT now() | Row insertion time — used for CDC and audit |
+| `updated_at` | TIMESTAMP WITH TIME ZONE | NOT NULL, DEFAULT now() | Last update time — updated via trigger on any column change; used for CDC |
 
-- **Host**: PostgreSQL
-- **Required Tables**:
-  - `obd_data_history` (tracking_db)
-- **Access**: Read-only access sufficient
+> **CDC note:** `updated_at` should be maintained by a `BEFORE UPDATE` trigger (e.g. `SET updated_at = now()`). Do not rely on the application layer to set it — trigger-based updates are consistent and cannot be bypassed.
 
-### Hardware Recommendations
+> **`cycle_duration_sec`** is a derived column (`cycle_end_ts - cycle_start_ts`). It is stored explicitly for query convenience so aggregation queries do not need to recompute it every time.
 
-**For Monthly Processing**:
-- CPU: 8+ cores (for parallel processing)
-- RAM: 16GB+ (for large DataFrames)
-- Storage: 5GB+ free space (for output files)
-- Network: Stable connection to database
-
----
-
-## Performance Optimization
-
-### Parallel Processing
-```python
-# Utilize ThreadPoolExecutor for I/O-bound operations
-with ThreadPoolExecutor(max_workers=20) as executor:
-    futures = {executor.submit(fetch_and_process_cycle, row): idx
-               for idx, row in cycles_df.iterrows()}
-```
-
-### Memory Management
-- Process in batches to avoid memory overflow
-- Use chunked CSV reading for large files
-- Clear intermediate DataFrames after aggregation
-
-### Database Optimization
-- Use indexed queries on `uniqueid` and `ts`
-- Fetch only required columns
-- Use connection pooling
+> **`overall_mileage_kmpl`, `clutch_riding_mileage_kmpl`, `normal_riding_mileage_kmpl`** are also derived (distance / consumption). Stored for the same reason — avoids recomputation in fleet aggregation queries that scan large date ranges.
 
 ---
 
-## Future Enhancements
+### Table 2 — `events_for_clutch_riding`
 
-1. **Real-time Alerts**: Trigger notifications for excessive clutch riding
-2. **Driver Scoring**: Individual driver behavior scores
-3. **Predictive Maintenance**: Estimate clutch replacement schedules
-4. **Route Analysis**: Correlate with GPS data to identify problematic routes
-5. **Comparative Analytics**: Fleet benchmarking across regions
-6. **Machine Learning**: Predict clutch failures based on riding patterns
+One row per detected clutch-riding or normal-riding segment (after noise merging). Child table of `clutch_riding_cycles` via `cycle_id`.
 
----
+**Primary key:** `event_id` — surrogate key for this table, generation strategy left to the tech team.
 
-## Support & Maintenance
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `event_id` | VARCHAR | PK, NOT NULL | Surrogate primary key for this table — generation strategy left to the tech team |
+| `cycle_id` | VARCHAR | NOT NULL, FK | FK → `clutch_riding_cycles.cycle_id` |
+| `unique_id` | VARCHAR | NOT NULL | Vehicle device identifier (OBD unit ID) |
+| `event_type` | VARCHAR | NOT NULL | `clutch_riding` or `normal_riding` |
+| `event_start_ts` | BIGINT | NOT NULL | UNIX timestamp (seconds) — start of the segment |
+| `event_end_ts` | BIGINT | NOT NULL | UNIX timestamp (seconds) — end of the segment |
+| `duration_sec` | FLOAT | NOT NULL | Duration of the segment in seconds |
+| `distance_km` | FLOAT | NOT NULL | Distance covered during the segment (km) |
+| `avg_speed_kmh` | FLOAT | NOT NULL | Average vehicle speed during the segment (km/h) |
+| `avg_rpm` | FLOAT | NOT NULL | Average engine RPM during the segment |
+| `severity` | VARCHAR | NOT NULL | Duration tier: `Short` / `Medium` / `Long` / `Very Long` |
+| `fuel_consumed_liters` | FLOAT | NOT NULL | Fuel consumed during the segment (L) |
+| `start_lat` | FLOAT | NOT NULL | GPS latitude at the start of this segment |
+| `start_lng` | FLOAT | NOT NULL | GPS longitude at the start of this segment |
+| `end_lat` | FLOAT | NOT NULL | GPS latitude at the end of this segment |
+| `end_lng` | FLOAT | NOT NULL | GPS longitude at the end of this segment |
+| `dqm_fuel_error` | BOOLEAN | NOT NULL | Propagated from cycle DQM — fuel sensor missing or fully null |
+| `dqm_dist_error` | BOOLEAN | NOT NULL | Propagated from cycle DQM — OBD odometer missing or fully null |
+| `dqm_speed_error` | BOOLEAN | NOT NULL | Propagated from cycle DQM — impossible speed detected (`≥ 250 km/h`) |
+| `dqm_gap_error` | BOOLEAN | NOT NULL | Propagated from cycle DQM — large time gap (`> 60 s`) in raw data |
+| `created_at` | TIMESTAMP WITH TIME ZONE | NOT NULL, DEFAULT now() | Row insertion time — used for CDC and audit |
+| `updated_at` | TIMESTAMP WITH TIME ZONE | NOT NULL, DEFAULT now() | Last update time — maintained by `BEFORE UPDATE` trigger; used for CDC |
 
-### Common Issues
+> **`mileage_kmpl` removed:** Previously listed as a stored column. It is a derived value (`distance_km / fuel_consumed_liters`) that can be computed on the fly. Storing it risks the stored value drifting out of sync with the source columns if either is updated. Consumers that need mileage per event should compute it at query time.
 
-**Issue**: Excel export fails with "sheet too large"
-- **Solution**: Automatically handled - CSV export used for large datasets
-
-**Issue**: Database connection timeout
-- **Solution**: Increase connection timeout or reduce NUM_WORKERS
-
-**Issue**: Memory error during processing
-- **Solution**: Reduce BATCH_SIZE or process in smaller date ranges
-
-**Issue**: Seaborn not available
-- **Solution**: Use `clutch_riding_visualization_no_seaborn.ipynb` (pure matplotlib)
-
----
-
-## License
-
-Internal use only.
-
----
-
-## Contact
-
-For questions or issues, contact the Data Science team.
+The `event_id` generation strategy is left to the tech team's discretion. It must guarantee global uniqueness across all events in the table.
 
 ---
-
-**Last Updated**: January 2026
